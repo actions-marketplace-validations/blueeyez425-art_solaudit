@@ -107,6 +107,12 @@ bun run dev
 
 Each rule is implemented as real regex/line-scanning logic in [`packages/core/src/rules/index.ts`](./packages/core/src/rules/index.ts) — see that file (and its accompanying [tests](./packages/core/src/rules/index.test.ts)) for the exact matching heuristics and false-positive guards.
 
+## Accuracy
+
+On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic engine scores **93.8% precision, 100% recall, 96.8% F1** on rule-covered categories.
+
+One known gap remains: **duplicate mutable accounts**. A regex “distinctness” heuristic produced false positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type), so that rule was not shipped. These numbers describe this suite, not general security effectiveness.
+
 ## Output formats (CLI)
 
 - **Human** (default) — colorized terminal report grouped by severity.

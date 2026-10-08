@@ -15,6 +15,7 @@ interface ScanResponse {
   result: ScanResult;
 }
 
+// Keep in sync with packages/core/src/rules/index.ts (10 rules).
 const RULES = [
   { id: "SOL-001", severity: "CRITICAL", name: "Missing Signer Check" },
   { id: "SOL-002", severity: "HIGH", name: "Unchecked Account Deserialization" },
@@ -24,6 +25,8 @@ const RULES = [
   { id: "SOL-006", severity: "HIGH", name: "Type Cosplay / Missing Discriminator Check" },
   { id: "SOL-007", severity: "MEDIUM", name: "Insecure Account Initialization" },
   { id: "SOL-008", severity: "LOW", name: "Missing Owner Check" },
+  { id: "SOL-009", severity: "HIGH", name: "Insecure Manual Account Closure" },
+  { id: "SOL-011", severity: "MEDIUM", name: "Missing Rent-Exemption Check" },
 ];
 
 export default function Home() {

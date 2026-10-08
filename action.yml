@@ -31,6 +31,7 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # Pin to a published npm version. Bump this after `npm publish` of a new CLI.
     - name: Run SolAudit
       shell: bash
       run: npx --yes solaudit@0.1.2 "${{ inputs.path }}" --min-severity "${{ inputs['min-severity'] }}"

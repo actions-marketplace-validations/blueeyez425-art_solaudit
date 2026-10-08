@@ -34,10 +34,9 @@
     "type": "git",
     "url": "git+https://github.com/blueeyez425-art/solaudit.git"
   },
-  "dependencies": {
-    "@solaudit/core": "workspace:*"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "@solaudit/core": "workspace:*",
     "bun-types": "latest"
   }
 }
