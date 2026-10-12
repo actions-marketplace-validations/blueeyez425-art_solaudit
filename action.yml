@@ -34,7 +34,7 @@ runs:
     # Pin to a published npm version. Bump this after `npm publish` of a new CLI.
     - name: Run SolAudit
       shell: bash
-      run: npx --yes solaudit@0.1.2 "${{ inputs.path }}" --min-severity "${{ inputs['min-severity'] }}"
+      run: npx --yes solaudit@0.2.0 "${{ inputs.path }}" --min-severity "${{ inputs['min-severity'] }}"
       continue-on-error: true
 
     - name: Generate SARIF report
@@ -46,7 +46,7 @@ runs:
         # That's correct for gating, but this step only generates the report file
         # (the actual pass/fail gate is the separate step below), so don't let a
         # non-zero exit here fail the job.
-        npx --yes solaudit@0.1.2 "${{ inputs.path }}" --sarif > solaudit-results.sarif || true
+        npx --yes solaudit@0.2.0 "${{ inputs.path }}" --sarif > solaudit-results.sarif || true
         echo "sarif-file=solaudit-results.sarif" >> "$GITHUB_OUTPUT"
 
     - name: Upload SARIF to GitHub code scanning
@@ -58,4 +58,4 @@ runs:
     - name: Enforce CRITICAL/HIGH findings gate
       if: ${{ inputs['fail-on-findings'] == 'true' }}
       shell: bash
-      run: npx --yes solaudit@0.1.2 "${{ inputs.path }}" --min-severity HIGH
+      run: npx --yes solaudit@0.2.0 "${{ inputs.path }}" --min-severity HIGH
