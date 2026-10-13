@@ -1,5 +1,5 @@
-name: 'SolAudit'
-description: 'Static analysis for Solana/Anchor programs. Scans for common on-chain vulnerability patterns and can upload results to GitHub code scanning.'
+name: 'SolAudit Security Scanner'
+description: 'Static analysis for Solana/Anchor programs. Finds common on-chain vulnerabilities and uploads SARIF to GitHub code scanning.'
 author: 'Cody Pack'
 branding:
   icon: 'shield'
