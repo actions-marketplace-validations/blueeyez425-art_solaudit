@@ -45,7 +45,8 @@ runs:
 
     - name: Run SolAudit
       shell: bash
-      run: "$SOLAUDIT_BIN" "${{ inputs.path }}" --min-severity "${{ inputs['min-severity'] }}"
+      run: |
+        "$SOLAUDIT_BIN" "${{ inputs.path }}" --min-severity "${{ inputs['min-severity'] }}"
       continue-on-error: true
 
     - name: Generate SARIF report
@@ -69,4 +70,5 @@ runs:
     - name: Enforce CRITICAL/HIGH findings gate
       if: ${{ inputs['fail-on-findings'] == 'true' }}
       shell: bash
-      run: "$SOLAUDIT_BIN" "${{ inputs.path }}" --min-severity HIGH
+      run: |
+        "$SOLAUDIT_BIN" "${{ inputs.path }}" --min-severity HIGH
