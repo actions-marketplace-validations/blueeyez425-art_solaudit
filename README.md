@@ -181,7 +181,7 @@ Please open an issue first for larger changes so we can discuss the approach.
 
 ## Support
 
-SolAudit is free and open source. If it catches a bug or saves you time, tips are welcome: [flipcash.com/d142ad60-e966-4967-bfa3-6d2332e59342](https://flipcash.com/d142ad60-e966-4967-bfa3-6d2332e59342)
+SolAudit is free and open source, and development continues with or without tips. If it catches a bug or saves you real time and you'd like to say thanks, tips are appreciated — never expected: [flipcash.com/d142ad60-e966-4967-bfa3-6d2332e59342](https://flipcash.com/d142ad60-e966-4967-bfa3-6d2332e59342)
 
 ## License
 
