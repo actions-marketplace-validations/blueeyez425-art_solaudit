@@ -398,6 +398,136 @@ const insecureAccountClosure: Rule = {
   },
 };
 
+/** SOL-010: Reinitialization Risk via init_if_needed */
+const initIfNeededReinit: Rule = {
+  id: "SOL-010",
+  name: "Reinitialization Risk via init_if_needed",
+  severity: "MEDIUM",
+  description:
+    "`#[account(init_if_needed, ...)]` initializes the account only when it does not already exist, so a pre-existing account flows through the same validation path. Without canonical PDA seeds/bump and constraints binding the account to expected state, this pattern has enabled reinitialization attacks where an attacker crafts or front-runs account state. Anchor's own documentation recommends avoiding `init_if_needed` unless strictly necessary.",
+  check(fileContent, filePath) {
+    const findings: Finding[] = [];
+    const blockRegex = /#\[account\(([\s\S]*?)\)\]/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = blockRegex.exec(fileContent)) !== null) {
+      const block = match[1];
+      if (!/\binit_if_needed\b/.test(block)) continue;
+
+      const line = fileContent.slice(0, match.index).split(/\r\n|\r|\n/).length;
+      findings.push(
+        makeFinding(
+          initIfNeededReinit,
+          filePath,
+          line,
+          `#[account(${block.trim()})]`,
+          "Prefer `init` plus a separate existence check. If `init_if_needed` is unavoidable, make the account a PDA with canonical `seeds`/`bump` and add `has_one`/`constraint` bindings so a pre-existing attacker-controlled account cannot pass validation."
+        )
+      );
+    }
+
+    return findings;
+  },
+};
+
+/**
+ * SOL-012 (EXPERIMENTAL): Duplicate Mutable Accounts
+ *
+ * Flags `#[derive(Accounts)]` structs that declare two or more mutable fields
+ * of the SAME account type without any `constraint = a.key() != b.key()`
+ * forcing them to be distinct. If the caller can pass the same account twice,
+ * logic that assumes the accounts are distinct (balance snapshots, dual
+ * debits/credits) can be exploited.
+ *
+ * This heuristic is deliberately NOT in the default ruleset: it false-positives
+ * on common legitimate patterns (e.g. a deposit instruction's user/vault token
+ * accounts, which share a type and rarely carry an explicit != constraint).
+ * It ships behind the CLI's `--experimental` flag for users who want maximum
+ * signal and are willing to triage noisier results.
+ */
+const duplicateMutableAccounts: Rule = {
+  id: "SOL-012",
+  name: "Duplicate Mutable Accounts (experimental)",
+  severity: "HIGH",
+  description:
+    "Two or more mutable accounts of the same type in one instruction with no `constraint = a.key() != b.key()` forcing distinctness. If the surrounding logic assumes the accounts are different (e.g. reading one balance and writing the other, or debiting one and crediting the other), passing the same account twice can corrupt accounting. Add an explicit inequality constraint or restructure the instruction.",
+  check(fileContent, filePath) {
+    const findings: Finding[] = [];
+    const lines = splitLines(fileContent);
+
+    // Locate each #[derive(Accounts)] struct and brace-match its body.
+    const structStart = /#\[derive\(\s*Accounts\s*\)\][\s\S]*?pub struct\s+\w+[^\{]*\{/g;
+    let sm: RegExpExecArray | null;
+
+    while ((sm = structStart.exec(fileContent)) !== null) {
+      let depth = 1;
+      let i = sm.index + sm[0].length;
+      while (i < fileContent.length && depth > 0) {
+        if (fileContent[i] === "{") depth++;
+        else if (fileContent[i] === "}") depth--;
+        i++;
+      }
+      const body = fileContent.slice(sm.index, i);
+      // A comment merely *mentioning* a distinctness constraint (e.g.
+      // "// BUG: no constraint = a.key() != b.key()") must not satisfy it.
+      const bodyNoComments = stripLineComments(body);
+
+      interface FieldInfo {
+        name: string;
+        typeName: string;
+        isMut: boolean;
+        offset: number;
+      }
+      const fields: FieldInfo[] = [];
+      const fieldRegex =
+        /((?:#\[[\s\S]*?\]\s*)*)pub\s+(\w+)\s*:\s*([\w:]+)\s*<\s*'info\s*(?:,\s*([\w:]+)\s*)?>/g;
+      let fm: RegExpExecArray | null;
+
+      while ((fm = fieldRegex.exec(body)) !== null) {
+        const attrs = fm[1] || "";
+        const isMut = /#\[account\([\s\S]*?\bmut\b[\s\S]*?\)\]/.test(attrs);
+        // Account<'info, T> -> T; bare Signer<'info>/Program<'info, T> handled too.
+        const typeName = fm[4] || fm[3];
+        fields.push({ name: fm[2], typeName, isMut, offset: sm.index + fm.index });
+      }
+
+      const mutByType = new Map<string, FieldInfo[]>();
+      for (const f of fields) {
+        if (!f.isMut) continue;
+        const group = mutByType.get(f.typeName) || [];
+        group.push(f);
+        mutByType.set(f.typeName, group);
+      }
+
+      for (const group of mutByType.values()) {
+        if (group.length < 2) continue;
+        const first = group[0];
+        for (let g = 1; g < group.length; g++) {
+          const other = group[g];
+          const distinct = new RegExp(
+            `${first.name}\\.key\\(\\)\\s*!=\\s*${other.name}\\.key\\(\\)|` +
+              `${other.name}\\.key\\(\\)\\s*!=\\s*${first.name}\\.key\\(\\)`
+          );
+          if (distinct.test(bodyNoComments)) continue;
+
+          const line = fileContent.slice(0, other.offset).split(/\r\n|\r|\n/).length;
+          findings.push(
+            makeFinding(
+              duplicateMutableAccounts,
+              filePath,
+              line,
+              lines[line - 1] || other.name,
+              `Fields \`${first.name}\` and \`${other.name}\` are both mutable \`${other.typeName}\` accounts with no distinctness constraint. Add \`constraint = ${other.name}.key() != ${first.name}.key()\` (if the instruction requires them to differ) or document why aliasing is safe.`
+            )
+          );
+        }
+      }
+    }
+
+    return findings;
+  },
+};
+
 /** SOL-011: Missing Rent-Exemption Check on Partial Withdrawal */
 const missingRentExemptCheck: Rule = {
   id: "SOL-011",
@@ -447,7 +577,14 @@ export const rules: Rule[] = [
   insecureInit,
   missingOwnerCheck,
   insecureAccountClosure,
+  initIfNeededReinit,
   missingRentExemptCheck,
 ];
+
+/**
+ * Opt-in rules that are too noisy for the default ruleset (see each rule's
+ * comment). Included only when the CLI is run with `--experimental`.
+ */
+export const experimentalRules: Rule[] = [duplicateMutableAccounts];
 
 export default rules;

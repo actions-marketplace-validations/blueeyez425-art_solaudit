@@ -2,7 +2,7 @@ import type { ScanResult, Severity } from "../types";
 import { rules } from "../rules/index";
 
 const SARIF_VERSION = "2.1.0";
-const TOOL_VERSION = "0.2.0";
+const TOOL_VERSION = "0.3.0";
 
 function severityToSarifLevel(severity: Severity): "error" | "warning" | "note" {
   switch (severity) {

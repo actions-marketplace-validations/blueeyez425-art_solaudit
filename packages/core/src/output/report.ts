@@ -36,7 +36,7 @@ const SEVERITY_ORDER: Severity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
 export function printReport(result: ScanResult): void {
   const timestamp = new Date().toISOString();
 
-  console.log(`${BOLD}${CYAN}SolAudit${RESET} ${DIM}v0.2.0 — static analysis for Anchor/Solana programs${RESET}`);
+  console.log(`${BOLD}${CYAN}SolAudit${RESET} ${DIM}v0.3.0 — static analysis for Anchor/Solana programs${RESET}`);
   console.log(`${DIM}Scanned ${result.scannedFiles} file(s) at ${timestamp}${RESET}`);
   console.log(`${GRAY}${"─".repeat(70)}${RESET}`);
 

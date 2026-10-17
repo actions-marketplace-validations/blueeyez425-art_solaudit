@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-09-23T00:20:47.684Z",
+  "generatedAt": "2026-10-17T01:16:21.853Z",
   "aggregate": {
-    "truePositives": 15,
+    "truePositives": 16,
     "falsePositives": 1,
     "falseNegatives": 0,
-    "precision": 0.9375,
+    "precision": 0.9411764705882353,
     "recall": 1,
-    "f1": 0.967741935483871
+    "f1": 0.9696969696969697
   },
   "knownGaps": {
     "total": 1,
@@ -181,6 +181,22 @@
       "falseNegatives": [],
       "isKnownGap": false,
       "vulnClass": "closed-account-revival"
+    },
+    {
+      "file": "sol-010-init-if-needed.rs",
+      "expectedRuleIds": [
+        "SOL-010"
+      ],
+      "foundRuleIds": [
+        "SOL-010"
+      ],
+      "truePositives": [
+        "SOL-010"
+      ],
+      "falsePositives": [],
+      "falseNegatives": [],
+      "isKnownGap": false,
+      "vulnClass": "reinitialization-via-init-if-needed"
     },
     {
       "file": "gap-002-duplicate-mutable-accounts.rs",

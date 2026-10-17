@@ -96,11 +96,20 @@
       "notes": "Manual lamport-drain 'close' pattern that never zeroes the discriminator or reassigns owner to System Program, unlike Anchor's close = constraint. Formerly an undetected gap; now covered by rule SOL-009."
     },
     {
+      "file": "sol-010-init-if-needed.rs",
+      "expectedRuleIds": [
+        "SOL-010"
+      ],
+      "isKnownGap": false,
+      "vulnClass": "reinitialization-via-init-if-needed",
+      "notes": "init_if_needed with no seeds/has_one constraint lets a pre-existing attacker-crafted account pass as freshly initialized (reinitialization risk)."
+    },
+    {
       "file": "gap-002-duplicate-mutable-accounts.rs",
       "expectedRuleIds": [],
       "isKnownGap": true,
       "vulnClass": "duplicate-mutable-accounts",
-      "notes": "Two mutable token accounts in one instruction with no constraint forcing them to be distinct, allowing the same account to be passed for both. Deliberately NOT covered by a deterministic rule: a regex-based distinctness check produced false positives on common, legitimate patterns (e.g. a deposit instruction's user/vault token accounts of the same type with no explicit != constraint), which would have hurt the benchmark's own precision number. Remains a genuine, honestly-documented gap suited to AI-assisted review instead of a fragile heuristic."
+      "notes": "Two mutable token accounts in one instruction with no constraint forcing them to be distinct, allowing the same account to be passed for both. Deliberately NOT covered by a deterministic rule: a regex-based distinctness check produced false positives on common, legitimate patterns (e.g. a deposit instruction's user/vault token accounts of the same type with no explicit != constraint), which would have hurt the benchmark's own precision number. Remains a genuine, honestly-documented gap suited to AI-assisted review instead of a fragile heuristic. As of 0.3.0 an experimental heuristic (SOL-012) covers this class behind the CLI --experimental flag; it remains excluded from the default ruleset and from this baseline precision measurement."
     },
     {
       "file": "sol-011-missing-rent-exempt-check.rs",

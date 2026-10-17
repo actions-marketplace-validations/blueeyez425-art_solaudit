@@ -1,7 +1,7 @@
 # SolAudit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![npm version](https://img.shields.io/badge/npm-v0.2.0-blue.svg)](https://www.npmjs.com/package/solaudit)
+[![npm version](https://img.shields.io/badge/npm-v0.3.0-blue.svg)](https://www.npmjs.com/package/solaudit)
 [![build](https://img.shields.io/badge/build-passing-brightgreen.svg)](./.github/workflows/ci.yml)
 
 **A zero-dependency static-analysis engine that scans Anchor/Solana Rust programs for the vulnerability patterns behind the most common on-chain exploits — available as a CLI and as a free web app.**
@@ -44,6 +44,7 @@ solaudit [path] [options]
 | `--json` | Print raw scan results as JSON |
 | `--sarif` | Print results as SARIF 2.1.0 (for GitHub Code Scanning) |
 | `--min-severity <level>` | Only report findings at or above `CRITICAL`\|`HIGH`\|`MEDIUM`\|`LOW`\|`INFO` |
+| `--experimental` | Also run opt-in experimental rules (currently `SOL-012` Duplicate Mutable Accounts); higher signal, more false positives |
 | `--help` | Show usage |
 
 ### Example
@@ -53,7 +54,7 @@ $ solaudit ./examples
 ```
 
 ```
-SolAudit v0.2.0 — static analysis for Anchor/Solana programs
+SolAudit v0.3.0 — static analysis for Anchor/Solana programs
 Scanned 1 file(s) at 2026-08-27T06:00:00.000Z
 ──────────────────────────────────────────────────────────────────────
 
@@ -103,21 +104,23 @@ bun run dev
 | `SOL-007` | MEDIUM | Insecure Account Initialization | `#[account(init, ...)]` constraints missing `payer` and/or `space` |
 | `SOL-008` | LOW | Missing Owner Check | Raw `AccountInfo` fields used without a nearby `.owner` comparison |
 | `SOL-009` | HIGH | Insecure Manual Account Closure | An account's lamports manually drained to zero without discriminator zeroing or owner reassignment (unlike Anchor's `close = destination`), enabling closed-account revival |
+| `SOL-010` | MEDIUM | Reinitialization Risk via init_if_needed | `#[account(init_if_needed, ...)]` without canonical PDA seeds / `has_one` constraints, letting a pre-existing attacker-crafted account pass as freshly initialized |
 | `SOL-011` | MEDIUM | Missing Rent-Exemption Check | A partial lamport withdrawal with no nearby `Rent::get()?.minimum_balance(...)` check, risking runtime garbage-collection of the account |
 
 Each rule is implemented as real regex/line-scanning logic in [`packages/core/src/rules/index.ts`](./packages/core/src/rules/index.ts) — see that file (and its accompanying [tests](./packages/core/src/rules/index.test.ts)) for the exact matching heuristics and false-positive guards.
 
 ## Accuracy
 
-On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic engine scores **93.8% precision, 100% recall, 96.8% F1** on rule-covered categories.
+On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic engine scores **94.1% precision, 100% recall, 97.0% F1** on rule-covered categories.
 
-One known gap remains: **duplicate mutable accounts**. A regex “distinctness” heuristic produced false positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type), so that rule was not shipped. These numbers describe this suite, not general security effectiveness.
+**Duplicate mutable accounts** is covered by the experimental `SOL-012` rule, available via `solaudit --experimental`. A “distinctness” heuristic false-positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type with no explicit `!=` constraint), so it stays opt-in to protect the default ruleset's precision. These numbers describe this suite, not general security effectiveness.
 
 ## Output formats (CLI)
 
 - **Human** (default) — colorized terminal report grouped by severity.
 - **JSON** (`--json`) — the full `ScanResult` object (`scannedFiles`, `findings[]`, `summary`).
 - **SARIF** (`--sarif`) — [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) output compatible with GitHub Code Scanning.
+- **Experimental rules** (`--experimental`) — opt into noisier, higher-signal heuristics (currently `SOL-012` Duplicate Mutable Accounts). Recommended for deep manual reviews rather than CI gates.
 
 ## GitHub Actions
 
