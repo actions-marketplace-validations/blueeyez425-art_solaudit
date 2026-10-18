@@ -36,11 +36,12 @@ broader protocol design *should* be, not just a local syntactic pattern.
 Two of the three vulnerability classes originally in this "known gap"
 category — closed-account revival and missing rent-exemption checks — have
 since been promoted to real deterministic rules (`SOL-009` and `SOL-011`).
-One remains a genuine, honestly-documented gap:
+One remains a genuine, honestly-documented gap in the *default* ruleset
+(now covered by the opt-in experimental rule `SOL-012`, see below):
 
 | Sample | Vulnerability class | Why the rule engine can't catch it |
 |---|---|---|
-| `gap-002-duplicate-mutable-accounts.rs` | Duplicate mutable accounts | Requires reasoning about whether two *different* account fields are constrained to be distinct — no fixed syntax to grep for. A regex-based "distinctness" heuristic was prototyped and rejected: it produced false positives on common, legitimate patterns (e.g. a deposit instruction's user/vault token accounts of the same type with no explicit `!=` constraint), which would have hurt the benchmark's own precision. We chose not to ship a rule that trades honesty for a bigger rule count. |
+| `gap-002-duplicate-mutable-accounts.rs` | Duplicate mutable accounts | Requires reasoning about whether two *different* account fields are constrained to be distinct — no fixed syntax to grep for. A regex-based "distinctness" heuristic false-positives on common, legitimate patterns (e.g. a deposit instruction's user/vault token accounts of the same type with no explicit `!=` constraint), which would hurt the benchmark's own precision. As of 0.3.0 this heuristic ships as the **opt-in** rule `SOL-012` (CLI flag `--experimental`) for deep manual reviews, while staying out of the default ruleset and this baseline measurement. |
 
 This is exactly the kind of finding an AI-assisted review layer is suited
 for: it requires contextual/semantic reasoning about intent, not pattern
@@ -52,9 +53,9 @@ Baseline (deterministic rule engine, `bun benchmark/harness/run_baseline.ts`):
 
 | Metric | Result |
 |---|---|
-| Precision | 93.8% |
+| Precision | 94.1% |
 | Recall | 100.0% |
-| F1 | 96.8% |
+| F1 | 97.0% |
 | Known gaps correctly left undetected (as expected) | 0/1 |
 
 The one false positive is a real, documented limitation of `SOL-001`'s

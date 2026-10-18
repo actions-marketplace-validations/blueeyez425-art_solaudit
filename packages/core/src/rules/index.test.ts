@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { rules } from "./index";
+import { rules, experimentalRules } from "./index";
 
 function ruleById(id: string) {
-  const rule = rules.find((r) => r.id === id);
+  const rule = [...rules, ...experimentalRules].find((r) => r.id === id);
   if (!rule) throw new Error(`rule ${id} not found`);
   return rule;
 }
@@ -115,6 +115,69 @@ describe("SOL-009 Insecure Manual Account Closure", () => {
   });
 });
 
+describe("SOL-010 Reinitialization Risk via init_if_needed", () => {
+  test("flags init_if_needed account constraints", () => {
+    const src = `#[account(init_if_needed, payer = authority, space = 8 + 32)]\npub record: Account<'info, Record>,`;
+    const findings = ruleById("SOL-010").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+    expect(findings[0].ruleId).toBe("SOL-010");
+  });
+
+  test("does not flag plain init", () => {
+    const src = `#[account(init, payer = authority, space = 8 + 32)]\npub vault: Account<'info, Vault>,`;
+    const findings = ruleById("SOL-010").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+});
+
+describe("SOL-012 Duplicate Mutable Accounts (experimental)", () => {
+  test("flags two mutable accounts of the same type with no distinctness constraint", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Swap<'info> {
+        #[account(mut)]
+        pub account_a: Account<'info, TokenAccount>,
+        #[account(mut)]
+        pub account_b: Account<'info, TokenAccount>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-012").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+    expect(findings[0].ruleId).toBe("SOL-012");
+  });
+
+  test("does not flag when an inequality constraint forces distinctness", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Swap<'info> {
+        #[account(mut)]
+        pub account_a: Account<'info, TokenAccount>,
+        #[account(mut, constraint = account_b.key() != account_a.key())]
+        pub account_b: Account<'info, TokenAccount>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-012").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("does not flag mutable accounts of different types", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Deposit<'info> {
+        #[account(mut)]
+        pub vault: Account<'info, Vault>,
+        #[account(mut)]
+        pub user_token: Account<'info, TokenAccount>,
+        pub owner: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-012").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+});
+
 describe("SOL-011 Missing Rent-Exemption Check", () => {
   test("flags partial lamport withdrawal with no rent check nearby", () => {
     const src = `
@@ -148,9 +211,16 @@ describe("SOL-011 Missing Rent-Exemption Check", () => {
 });
 
 describe("rules registry", () => {
-  test("exposes exactly 10 rules with unique ids", () => {
-    expect(rules.length).toBe(10);
+  test("exposes exactly 11 default rules with unique ids", () => {
+    expect(rules.length).toBe(11);
     const ids = new Set(rules.map((r) => r.id));
-    expect(ids.size).toBe(10);
+    expect(ids.size).toBe(11);
+  });
+
+  test("experimental rules are excluded from the default set", () => {
+    const defaultIds = new Set(rules.map((r) => r.id));
+    for (const rule of experimentalRules) {
+      expect(defaultIds.has(rule.id)).toBe(false);
+    }
   });
 });

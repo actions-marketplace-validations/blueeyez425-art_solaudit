@@ -1,6 +1,6 @@
 {
   "name": "solaudit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open-source static analysis CLI for Anchor/Solana programs",
   "type": "module",
   "bin": {
