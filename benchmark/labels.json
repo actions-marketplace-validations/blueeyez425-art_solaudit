@@ -5,12 +5,11 @@
     {
       "file": "sol-001-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-001",
-        "SOL-008"
+        "SOL-001"
       ],
       "isKnownGap": false,
       "vulnClass": "missing-signer-check",
-      "notes": "Token transfer authorized by an unchecked AccountInfo, never validated as a Signer. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo."
+      "notes": "Token transfer authorized by an unchecked AccountInfo, never validated as a Signer. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo. (0.3.1 label revision: SOL-008 no longer expected here \u2014 the rule now targets raw accounts whose *data* is trusted or whose key is *assigned into state*; this sample's raw account is only passed to a CPI or key-compared, and the primary issue is caught by the more specific rule.)"
     },
     {
       "file": "sol-001-safe.rs",
@@ -32,22 +31,20 @@
     {
       "file": "sol-003-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-003",
-        "SOL-008"
+        "SOL-003"
       ],
       "isKnownGap": false,
       "vulnClass": "arbitrary-cpi",
-      "notes": "invoke() called with a caller-supplied program id, never checked against a known constant. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo."
+      "notes": "invoke() called with a caller-supplied program id, never checked against a known constant. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo. (0.3.1 label revision: SOL-008 no longer expected here \u2014 the rule now targets raw accounts whose *data* is trusted or whose key is *assigned into state*; this sample's raw account is only passed to a CPI or key-compared, and the primary issue is caught by the more specific rule.)"
     },
     {
       "file": "sol-004-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-004",
-        "SOL-008"
+        "SOL-004"
       ],
       "isKnownGap": false,
       "vulnClass": "missing-bump-canonicalization",
-      "notes": "create_program_address called with a caller-supplied bump instead of find_program_address. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo."
+      "notes": "create_program_address called with a caller-supplied bump instead of find_program_address. Also legitimately triggers SOL-008 since the same account is a raw, owner-unchecked AccountInfo. (0.3.1 label revision: SOL-008 no longer expected here \u2014 the rule now targets raw accounts whose *data* is trusted or whose key is *assigned into state*; this sample's raw account is only passed to a CPI or key-compared, and the primary issue is caught by the more specific rule.)"
     },
     {
       "file": "sol-005-vulnerable.rs",

@@ -224,3 +224,201 @@ describe("rules registry", () => {
     }
   });
 });
+
+describe("constraint-layer awareness (0.3.1)", () => {
+  const IDIOMATIC = `
+    #[derive(Accounts)]
+    pub struct Withdraw<'info> {
+      #[account(mut, has_one = authority)]
+      pub vault: Account<'info, Vault>,
+      #[account(mut)]
+      pub vault_token_account: Account<'info, TokenAccount>,
+      #[account(mut)]
+      pub destination_token_account: Account<'info, TokenAccount>,
+      pub authority: Signer<'info>,
+      pub token_program: Program<'info, Token>,
+    }
+
+    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+      let cpi_accounts = Transfer {
+        from: ctx.accounts.vault_token_account.to_account_info(),
+        to: ctx.accounts.destination_token_account.to_account_info(),
+        authority: ctx.accounts.authority.to_account_info(),
+      };
+      let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+      token::transfer(cpi_ctx, amount)?;
+      Ok(())
+    }
+  `;
+
+  test("SOL-001: does not flag a transfer when the governing struct declares a Signer", () => {
+    const findings = ruleById("SOL-001").check(IDIOMATIC, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-001: still flags when the struct has no Signer field", () => {
+    const src = IDIOMATIC.replace("pub authority: Signer<'info>,", "pub authority: AccountInfo<'info>,");
+    const findings = ruleById("SOL-001").check(src, "test.rs");
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  test("SOL-001: does not flag PDA-signed CPI (invoke_signed nearby)", () => {
+    const src = `
+      pub fn withdraw(ctx: Context<Withdraw>, amount: u64, bump: u8) -> Result<()> {
+        let cpi_accounts = Transfer {
+          from: ctx.accounts.vault_token_account.to_account_info(),
+          to: ctx.accounts.destination_token_account.to_account_info(),
+          authority: ctx.accounts.vault_authority.to_account_info(),
+        };
+        let seeds = &[&[b"vault", &[bump]]];
+        let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_accounts, seeds);
+        token::transfer(cpi_ctx, amount)?;
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-001").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-001: does not flag a format string that merely mentions transfer", () => {
+    const src = `
+      pub fn check(ctx: Context<Check>, amount: u64) -> Result<()> {
+        require!(amount <= MAX, ErrorCode::TooBig);
+        msg!("Max transfer ({}) exceeded", amount);
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-001").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-004: does not flag find_program_address with the .0 accessor", () => {
+    const src = `
+      pub fn derive_it(program_id: &Pubkey) -> Pubkey {
+        let pda = Pubkey::find_program_address(&[b"vault"], program_id).0;
+        pda
+      }
+    `;
+    const findings = ruleById("SOL-004").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-005: does not flag intermediate tuple arithmetic", () => {
+    const src = `
+      pub fn split(ctx: Context<Split>, amount_owed: u64, vault_amount: u64) -> Result<()> {
+        let (from_vault, remainder) = (vault_amount, amount_owed - vault_amount);
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-005").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-005: still flags raw arithmetic written into account state", () => {
+    const src = `
+      pub fn stake(ctx: Context<Stake>, amount: u64) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.total_staked = pool.total_staked + amount;
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-005").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+
+  test("SOL-005: does not flag code inside #[cfg(test)] modules", () => {
+    const src = `
+      pub fn stake(ctx: Context<Stake>, amount: u64) -> Result<()> {
+        Ok(())
+      }
+      #[cfg(test)]
+      mod tests {
+        fn exercises() {
+          pool.total_staked = pool.total_staked + amount;
+        }
+      }
+    `;
+    const findings = ruleById("SOL-005").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-008: does not flag raw fields validated by a constraint in the file", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Init<'info> {
+        #[account(constraint = state.signer.eq(&drift_signer.key()))]
+        /// CHECK: program signer
+        pub drift_signer: AccountInfo<'info>,
+        pub state: Account<'info, State>,
+      }
+      pub fn handle(ctx: Context<Init>) -> Result<()> {
+        initialize_token_account(&ctx.accounts.token_program, &ctx.accounts.drift_signer)?;
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-008").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-008: flags an unconstrained raw field once, not per usage", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Consume<'info> {
+        /// CHECK: no validation
+        pub price_feed: AccountInfo<'info>,
+      }
+      pub fn consume(ctx: Context<Consume>) -> Result<()> {
+        let a = ctx.accounts.price_feed.try_borrow_data()?;
+        let b = ctx.accounts.price_feed.key();
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-008").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+
+  test("SOL-013: flags a token account not bound to an in-scope mint (Cashio class)", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Brrr<'info> {
+        pub bank: Box<Account<'info, Bank>>,
+        #[account(mut)]
+        pub crate_mint: Box<Account<'info, Mint>>,
+        #[account(mut)]
+        pub crate_collateral_tokens: Box<Account<'info, TokenAccount>>,
+      }
+    `;
+    const findings = ruleById("SOL-013").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+    expect(findings[0].ruleId).toBe("SOL-013");
+  });
+
+  test("SOL-013: does not flag when the token account is bound via token::mint", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Redeem<'info> {
+        #[account(mut)]
+        pub mint: Account<'info, Mint>,
+        #[account(mut, token::mint = mint, token::authority = authority)]
+        pub user_token: Account<'info, TokenAccount>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-013").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-013: does not flag structs with no mint account in scope", () => {
+    const src = `
+      #[derive(Accounts)]
+      pub struct Swap<'info> {
+        #[account(mut)]
+        pub user_token_a: Account<'info, TokenAccount>,
+        #[account(mut)]
+        pub vault_a: Account<'info, TokenAccount>,
+      }
+    `;
+    const findings = ruleById("SOL-013").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+});

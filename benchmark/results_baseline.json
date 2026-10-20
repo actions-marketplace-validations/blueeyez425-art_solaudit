@@ -1,31 +1,28 @@
 {
-  "generatedAt": "2026-10-17T01:16:21.853Z",
+  "generatedAt": "2026-10-20T00:18:23.241Z",
   "aggregate": {
-    "truePositives": 16,
-    "falsePositives": 1,
+    "truePositives": 13,
+    "falsePositives": 0,
     "falseNegatives": 0,
-    "precision": 0.9411764705882353,
+    "precision": 1,
     "recall": 1,
-    "f1": 0.9696969696969697
+    "f1": 1
   },
   "knownGaps": {
     "total": 1,
-    "correctlyEmpty": 0
+    "correctlyEmpty": 1
   },
   "samples": [
     {
       "file": "sol-001-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-001",
-        "SOL-008"
+        "SOL-001"
       ],
       "foundRuleIds": [
-        "SOL-008",
         "SOL-001"
       ],
       "truePositives": [
-        "SOL-001",
-        "SOL-008"
+        "SOL-001"
       ],
       "falsePositives": [],
       "falseNegatives": [],
@@ -64,16 +61,13 @@
     {
       "file": "sol-003-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-003",
-        "SOL-008"
+        "SOL-003"
       ],
       "foundRuleIds": [
-        "SOL-008",
         "SOL-003"
       ],
       "truePositives": [
-        "SOL-003",
-        "SOL-008"
+        "SOL-003"
       ],
       "falsePositives": [],
       "falseNegatives": [],
@@ -83,16 +77,13 @@
     {
       "file": "sol-004-vulnerable.rs",
       "expectedRuleIds": [
-        "SOL-004",
-        "SOL-008"
+        "SOL-004"
       ],
       "foundRuleIds": [
-        "SOL-004",
-        "SOL-008"
+        "SOL-004"
       ],
       "truePositives": [
-        "SOL-004",
-        "SOL-008"
+        "SOL-004"
       ],
       "falsePositives": [],
       "falseNegatives": [],
@@ -201,13 +192,9 @@
     {
       "file": "gap-002-duplicate-mutable-accounts.rs",
       "expectedRuleIds": [],
-      "foundRuleIds": [
-        "SOL-001"
-      ],
+      "foundRuleIds": [],
       "truePositives": [],
-      "falsePositives": [
-        "SOL-001"
-      ],
+      "falsePositives": [],
       "falseNegatives": [],
       "isKnownGap": true,
       "vulnClass": "duplicate-mutable-accounts"

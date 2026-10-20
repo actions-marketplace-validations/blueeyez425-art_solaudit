@@ -26,6 +26,8 @@ Options:
                           (CRITICAL | HIGH | MEDIUM | LOW | INFO)
   --experimental          Also run experimental rules (e.g. SOL-012 duplicate
                           mutable accounts). Higher signal, more false positives.
+  --include-tests         Also scan test/fuzz/fixture/example code (skipped by
+                          default; findings there are rarely actionable)
   --help                  Show this help message
 
 Examples:
@@ -50,6 +52,7 @@ async function main(): Promise<void> {
   const wantsJson = args.includes("--json");
   const wantsSarif = args.includes("--sarif");
   const wantsExperimental = args.includes("--experimental");
+  const includeTests = args.includes("--include-tests");
 
   let minSeverity: Severity = "INFO";
   const minSeverityIdx = args.indexOf("--min-severity");
@@ -73,7 +76,7 @@ async function main(): Promise<void> {
 
   const activeRules = wantsExperimental ? [...rules, ...experimentalRules] : rules;
 
-  const result = await scanDirectory(targetPath, activeRules);
+  const result = await scanDirectory(targetPath, activeRules, { includeTests });
 
   result.findings = result.findings.filter(
     (finding) => SEVERITY_RANK[finding.severity] <= SEVERITY_RANK[minSeverity]
