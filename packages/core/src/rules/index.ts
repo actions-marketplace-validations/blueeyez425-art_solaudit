@@ -1,4 +1,13 @@
 import type { Finding, Rule, Severity } from "../types";
+import {
+  findField,
+  getConstraintModel,
+  inRanges,
+  isTestLikePath,
+  lineOffset,
+  stripStringLiterals,
+  structAt,
+} from "../anchor";
 
 function makeFinding(
   rule: { id: string; name: string; severity: Severity },
@@ -42,15 +51,22 @@ const missingSignerCheck: Rule = {
   name: "Missing Signer Check",
   severity: "CRITICAL",
   description:
-    "A transfer or mint_to call was found without an is_signer / Signer<'info> check within the preceding 10 lines. Add a `Signer<'info>` account type or an explicit `require!(ctx.accounts.authority.is_signer, ...)` check before authorizing fund movement.",
+    "A transfer or mint_to call was found with no signer evidence: no is_signer check nearby, no Signer<'info> field on the governing Accounts struct, and no PDA signing (invoke_signed / new_with_signer). Add a `Signer<'info>` account type or an explicit `require!(ctx.accounts.authority.is_signer, ...)` check before authorizing fund movement.",
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
-    const callPattern = /\b(transfer|mint_to)\s*\(/;
+    const callPattern = /\b(?:transfer|mint_to|transfer_checked|mint_to_checked)\s*\(/;
+    const declPattern = /\bfn\s+(?:transfer|mint_to|transfer_checked|mint_to_checked)\s*\(/;
+    const model = getConstraintModel(fileContent);
 
-    lines.forEach((line, idx) => {
+    lines.forEach((rawLine, idx) => {
+      if (declPattern.test(rawLine)) return; // a function *declaration*, not a call
+      const line = stripStringLiterals(rawLine); // format strings are not calls
       if (!callPattern.test(line)) return;
       if (!line.includes("ctx.accounts.") && !fileContent.includes("ctx.accounts.")) return;
+
+      const offset = lineOffset(lines, idx);
+      if (inRanges(offset, model.testRanges)) return;
 
       const windowStart = Math.max(0, idx - 10);
       const window = lines.slice(windowStart, idx + 1).join("\n");
@@ -58,18 +74,46 @@ const missingSignerCheck: Rule = {
         /is_signer/.test(window) ||
         /Signer<\s*'info\s*>/.test(window) ||
         /#\[account\([^)]*signer[^)]*\)\]/i.test(window);
+      if (hasSignerEvidence) return;
 
-      if (!hasSignerEvidence) {
-        findings.push(
-          makeFinding(
-            missingSignerCheck,
-            filePath,
-            idx + 1,
-            line,
-            "Verify the authority/owner account is a Signer or explicitly check `.is_signer` before transferring or minting tokens."
-          )
-        );
+      // Extended window: PDA-signed CPI and instruction-construction patterns
+      // resolve the signer question at the invoke site, not the call site.
+      const extWindow = lines
+        .slice(windowStart, Math.min(lines.length, idx + 16))
+        .join("\n");
+      if (/\binvoke_signed\b/.test(extWindow)) return;
+      if (/\bnew_with_signer\b/.test(extWindow)) return;
+      // Instruction construction passed to invoke()/invoke_signed: the runtime
+      // enforces that the `from` account signed the transaction (or is PDA-
+      // signed). Covers both `system_instruction::transfer(...)` and aliased
+      // imports like `&transfer(...)` appearing as invoke() arguments.
+      if (/system_instruction::transfer/.test(line) && /\binvoke(?:_signed)?\s*\(/.test(extWindow)) {
+        return;
       }
+      // Aliased ix construction (`&transfer(...)`) appearing as an invoke()
+      // argument — same reasoning as system_instruction::transfer above.
+      if (!line.includes("::")) {
+        const beforeMatch = line.slice(0, line.search(callPattern));
+        if (/\binvoke(?:_signed)?\s*\([^)]*$/.test(beforeMatch)) return;
+        const prevLines = lines.slice(Math.max(0, idx - 3), idx);
+        if (prevLines.some((l) => /\binvoke(?:_signed)?\s*\([^)]*$/.test(l))) return;
+      }
+
+      // Constraint-layer awareness: if the governing Accounts struct (from the
+      // enclosing handler's Context<T> or impl block) declares a Signer field,
+      // Anchor rejects unsigned transactions at deserialization time.
+      const struct = structAt(model, offset);
+      if (struct && struct.fields.some((f) => f.isSignerTyped)) return;
+
+      findings.push(
+        makeFinding(
+          missingSignerCheck,
+          filePath,
+          idx + 1,
+          rawLine,
+          "Verify the authority/owner account is a Signer or explicitly check `.is_signer` before transferring or minting tokens."
+        )
+      );
     });
 
     return findings;
@@ -87,24 +131,35 @@ const uncheckedDeserialization: Rule = {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
     const pattern = /(Account|AccountLoader)::try_from\s*\(/;
+    const model = getConstraintModel(fileContent);
 
     lines.forEach((line, idx) => {
       if (!pattern.test(line)) return;
-      const prevLine = idx > 0 ? lines[idx - 1] : "";
-      const hasConstraint =
-        /#\[account\(/.test(prevLine) || /#\[account\(/.test(line);
+      const offset = lineOffset(lines, idx);
+      if (inRanges(offset, model.testRanges)) return;
 
-      if (!hasConstraint) {
-        findings.push(
-          makeFinding(
-            uncheckedDeserialization,
-            filePath,
-            idx + 1,
-            line,
-            "Add a `#[account(constraint = ..., owner = ...)]` attribute, or replace with a typed `Account<'info, T>` field so Anchor validates ownership and discriminator automatically."
-          )
-        );
+      // Constraint evidence may sit a few lines above the call.
+      const windowStart = Math.max(0, idx - 3);
+      const window = lines.slice(windowStart, idx + 1).join("\n");
+      if (/#\[account\(/.test(window)) return;
+
+      // If the deserialized account is a struct field carrying validation
+      // constraints (owner / constraint / has_one), Anchor already enforces it.
+      const argMatch = line.match(/::try_from\s*\(\s*&?\s*(?:ctx\.accounts\.|self\.)?(\w+)/);
+      if (argMatch) {
+        const field = findField(model, argMatch[1]);
+        if (field && field.validated) return;
       }
+
+      findings.push(
+        makeFinding(
+          uncheckedDeserialization,
+          filePath,
+          idx + 1,
+          line,
+          "Add a `#[account(constraint = ..., owner = ...)]` attribute, or replace with a typed `Account<'info, T>` field so Anchor validates ownership and discriminator automatically."
+        )
+      );
     });
 
     return findings;
@@ -157,41 +212,37 @@ const missingBumpCanonicalization: Rule = {
   name: "Missing Bump Seed Canonicalization",
   severity: "HIGH",
   description:
-    "PDA bump seeds must be derived via `find_program_address` and the canonical bump stored/validated on-chain. Calling `create_program_address` directly, or discarding the bump returned by `find_program_address`, allows bump-seed forgery attacks.",
+    "PDA bump seeds must be derived via `find_program_address` (which returns the canonical bump by construction) and stored/validated on-chain. Calling `create_program_address` directly with a caller-supplied bump allows bump-seed forgery attacks.",
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
+    const model = getConstraintModel(fileContent);
 
     lines.forEach((line, idx) => {
-      if (/create_program_address\s*\(/.test(line) && !/find_program_address/.test(line)) {
-        findings.push(
-          makeFinding(
-            missingBumpCanonicalization,
-            filePath,
-            idx + 1,
-            line,
-            "Use `Pubkey::find_program_address` to derive the canonical bump instead of calling `create_program_address` directly with a caller-supplied bump."
-          )
-        );
-        return;
-      }
+      if (!/create_program_address\s*\(/.test(line)) return;
+      const offset = lineOffset(lines, idx);
+      if (inRanges(offset, model.testRanges)) return;
 
-      const fpaMatch = line.match(/let\s+(\([^)]*\)|\w+)\s*=\s*[\w:]*find_program_address\s*\(/);
-      if (fpaMatch) {
-        const binding = fpaMatch[1];
-        const bindsBump = /\(\s*\w+\s*,\s*\w+\s*\)/.test(binding);
-        if (!bindsBump) {
-          findings.push(
-            makeFinding(
-              missingBumpCanonicalization,
-              filePath,
-              idx + 1,
-              line,
-              "Destructure and store the bump returned by `find_program_address` (e.g. `let (pda, bump) = ...`) and persist/validate it instead of discarding it."
-            )
-          );
-        }
-      }
+      // `find_program_address` returns the canonical bump by construction, so
+      // any usage of it — including the idiomatic `.0` accessor that discards
+      // the bump — is safe. Only direct `create_program_address` calls whose
+      // bump did not come from a nearby canonical derivation are suspect.
+      // (Comments are stripped first: a comment *mentioning* the safe API is
+      // not evidence it was used.)
+      const windowStart = Math.max(0, idx - 10);
+      const windowEnd = Math.min(lines.length, idx + 3);
+      const window = stripLineComments(lines.slice(windowStart, windowEnd).join("\n"));
+      if (/find_program_address/.test(window)) return;
+
+      findings.push(
+        makeFinding(
+          missingBumpCanonicalization,
+          filePath,
+          idx + 1,
+          line,
+          "Use `Pubkey::find_program_address` to derive the canonical bump instead of calling `create_program_address` directly with a caller-supplied bump."
+        )
+      );
     });
 
     return findings;
@@ -204,24 +255,37 @@ const integerOverflowRisk: Rule = {
   name: "Integer Overflow Risk",
   severity: "MEDIUM",
   description:
-    "Raw arithmetic (`+`, `-`, `*`) was performed on u64/u128-typed values without using checked or saturating arithmetic. Unchecked overflow can wrap silently in release builds without `overflow-checks = true`, corrupting balances. Use `.checked_add`/`.checked_sub`/`.checked_mul` or `saturating_*` and handle the `None` case.",
+    "Raw arithmetic (`+`, `-`, `*`) was written into account state (a field assignment or compound assignment) on amount-like values without checked or saturating arithmetic. Unchecked overflow can wrap silently in release builds without `overflow-checks = true`, corrupting balances. Use `.checked_add`/`.checked_sub`/`.checked_mul` or `saturating_*` and handle the `None` case.",
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
-    const arithmeticPattern = /\b(\w*(amount|balance|supply|total|shares|stake)\w*)\s*(\+|\-|\*)\s*\w/i;
+    if (isTestLikePath(filePath)) return findings;
+    const model = getConstraintModel(fileContent);
+    const arithmeticPattern =
+      /\b(\w*(amount|balance|supply|total|shares|stake|reserve|collateral|liquidity|principal)\w*)\s*(\+|\-|\*)\s*\w/i;
     const alreadySafe = /checked_(add|sub|mul|div)|saturating_(add|sub|mul)|wrapping_(add|sub|mul)/;
+    // Persisted-state writes: `foo.bar = ...`, `foo.bar += ...`, or `x += ...`.
+    // Intermediate locals (`let x = a - b`) are intentionally not flagged —
+    // the exploitable class is arithmetic that lands in on-chain state, and
+    // flagging every subtraction made this rule 34% of all real-world output.
+    const stateWritePattern =
+      /^\s*(?:[\w.\[\]]+\.)[\w.\[\]]+\s*(?:=|\+=|-=|\*=)\s*[^=>]|\b\w+\s*(?:\+=|-=|\*=)\s*[^=]/;
 
     lines.forEach((line, idx) => {
       if (alreadySafe.test(line)) return;
       if (line.trim().startsWith("//")) return;
-      if (arithmeticPattern.test(line)) {
+      if (/\d\.\d/.test(line)) return; // f64 BPS/price math doesn't wrap
+      const offset = lineOffset(lines, idx);
+      if (inRanges(offset, model.testRanges)) return;
+      const code = stripStringLiterals(line);
+      if (arithmeticPattern.test(code) && stateWritePattern.test(code)) {
         findings.push(
           makeFinding(
             integerOverflowRisk,
             filePath,
             idx + 1,
             line,
-            "Replace raw arithmetic with `.checked_add()/.checked_sub()/.checked_mul()` (propagating errors via `ok_or(ErrorCode::MathOverflow)?`) or `saturating_*` equivalents."
+            "Replace raw arithmetic written to state with `.checked_add()/.checked_sub()/.checked_mul()` (propagating errors via `ok_or(ErrorCode::MathOverflow)?`) or `saturating_*` equivalents."
           )
         );
       }
@@ -287,10 +351,16 @@ const insecureInit: Rule = {
       const hasPayer = /\bpayer\s*=/.test(block);
       const hasSpace = /\bspace\s*=/.test(block);
 
-      if (!hasPayer || !hasSpace) {
+      // Associated-token and token-account inits are exempt from `space` (and
+      // often `payer` looks different): Anchor derives allocation for them.
+      const isTokenInit = /\b(associated_token|token)::/.test(block);
+
+      if (!hasPayer || (!hasSpace && !isTokenInit)) {
         const upToMatch = fileContent.slice(0, match.index);
         const line = upToMatch.split(/\r\n|\r|\n/).length;
-        const missing = [!hasPayer && "payer", !hasSpace && "space"].filter(Boolean).join(" and ");
+        const missing = [!hasPayer && "payer", !hasSpace && !isTokenInit && "space"]
+          .filter(Boolean)
+          .join(" and ");
         findings.push(
           makeFinding(
             insecureInit,
@@ -313,23 +383,101 @@ const missingOwnerCheck: Rule = {
   name: "Missing Owner Check",
   severity: "LOW",
   description:
-    "A raw `AccountInfo` field is accessed via `ctx.accounts.` without a nearby `.owner` comparison. Raw `AccountInfo` accounts bypass Anchor's automatic ownership validation, so the program must manually verify `account.owner == expected_program_id` before trusting its data.",
+    "A raw `AccountInfo`/`UncheckedAccount` field carries no `owner`/`constraint`/`has_one` binding in its Accounts struct and no `.owner` comparison anywhere in the file. Raw accounts bypass Anchor's automatic ownership validation, so the program must manually verify `account.owner == expected_program_id` before trusting its data.",
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
+    const model = getConstraintModel(fileContent);
 
-    // Find field declarations typed as raw AccountInfo inside #[derive(Accounts)] structs.
+    if (model.structs.length > 0) {
+      // Constraint-aware path: only fields with NO validation anywhere count.
+      // A field is considered validated if any same-named declaration in the
+      // file carries an owner/constraint/has_one/address binding, or an owner
+      // comparison on the field appears anywhere in the file.
+      const validatedNames = new Set<string>();
+      for (const s of model.structs) {
+        for (const f of s.fields) {
+          if (f.validated) validatedNames.add(f.name);
+        }
+      }
+
+      const suspects = new Map<string, number>(); // name -> declaration line
+      for (const s of model.structs) {
+        for (const f of s.fields) {
+          if (!f.isRaw || validatedNames.has(f.name)) continue;
+          if (new RegExp(`\\b${f.name}\\s*\\.owner\\b`).test(stripLineComments(fileContent))) {
+            continue; // manual owner check exists somewhere in the file
+          }
+          if (!suspects.has(f.name)) suspects.set(f.name, f.line);
+        }
+      }
+
+      // Report once per field, at its first use (falling back to declaration).
+      for (const [name, declLine] of suspects) {
+        const usagePattern = new RegExp(`ctx\\.accounts\\.${name}\\b`);
+        let reportLine = declLine;
+        let snippet = lines[declLine - 1] || name;
+        let touchesData = false;
+        for (let i = 0; i < lines.length; i++) {
+          if (!usagePattern.test(lines[i]) || i + 1 === declLine) continue;
+          if (reportLine === declLine) {
+            reportLine = i + 1;
+            snippet = lines[i];
+          }
+          // Reading account *data* is the dangerous usage; key comparisons and
+          // CPI pass-throughs are validated elsewhere (or by the callee).
+          if (
+            /try_borrow_data|\.load\s*\(|data\.borrow|try_from|\.lamports\s*\(|accessor::/.test(
+              lines[i]
+            )
+          ) {
+            touchesData = true;
+            reportLine = i + 1;
+            snippet = lines[i];
+          }
+          // Assigning an unvalidated account's key into persistent state
+          // (e.g. `bank.curator = ctx.accounts.admin.key()`) asserts the
+          // identity of an account nothing has checked — worth review.
+          // Comparisons (`==`, require_keys_eq) and CPI args are fine.
+          if (
+            new RegExp(`=\\s*(?:&)?ctx\\.accounts\\.${name}\\.key\\s*\\(`).test(lines[i]) &&
+            !/==|require_keys_eq/.test(lines[i])
+          ) {
+            touchesData = true;
+            reportLine = i + 1;
+            snippet = lines[i];
+          }
+        }
+        if (reportLine === declLine) continue; // declared but never dereferenced via ctx.accounts
+        if (!touchesData) continue; // key-only / CPI pass-through usage
+        findings.push(
+          makeFinding(
+            missingOwnerCheck,
+            filePath,
+            reportLine,
+            snippet,
+            `\`${name}\` is a raw AccountInfo with no constraint binding. Add an explicit \`require!(ctx.accounts.${name}.owner == &expected_program_id, ErrorCode::InvalidOwner)\` check (or an \`#[account(owner = ...)]\` constraint) before trusting its data.`
+          )
+        );
+      }
+
+      return findings;
+    }
+
+    // Fallback for non-Anchor files (no parsable Accounts structs, e.g.
+    // pinocchio/native programs): legacy heuristic over raw field declarations.
     const rawFieldPattern = /pub\s+(\w+)\s*:\s*AccountInfo<\s*'info\s*>/;
     const rawFields = new Set<string>();
     lines.forEach((line) => {
       const m = line.match(rawFieldPattern);
       if (m) rawFields.add(m[1]);
     });
-
     if (rawFields.size === 0) return findings;
 
+    const flagged = new Set<string>();
     lines.forEach((line, idx) => {
       for (const field of rawFields) {
+        if (flagged.has(field)) continue;
         const usagePattern = new RegExp(`ctx\\.accounts\\.${field}\\b`);
         if (!usagePattern.test(line)) continue;
 
@@ -339,6 +487,7 @@ const missingOwnerCheck: Rule = {
         const hasOwnerCheck = new RegExp(`${field}\\.owner`).test(window) || /\.owner\s*==/.test(window);
 
         if (!hasOwnerCheck) {
+          flagged.add(field);
           findings.push(
             makeFinding(
               missingOwnerCheck,
@@ -567,6 +716,64 @@ const missingRentExemptCheck: Rule = {
   },
 };
 
+/**
+ * SOL-013: Token Account Not Bound to Mint
+ *
+ * When an instruction takes both a token account and a mint account, but the
+ * token account's constraints never bind it to that mint (`token::mint = ...`,
+ * `associated_token::mint = ...`, or a constraint/address pin), the program
+ * may accept a token account of the WRONG mint. This is the vulnerability
+ * class behind the Cashio infinite-mint exploit (~$50M): the program accepted
+ * arbitrary token mints as collateral because the collateral token account
+ * was never validated against the expected mint.
+ *
+ * Scoped conservatively to keep precision high: the rule only fires when a
+ * `Mint` account is in scope in the SAME struct (so there is an obvious mint
+ * to bind to), and stays quiet when the token account is initialized in place
+ * (Anchor requires token::mint for init) or carries any other binding.
+ *
+ * Ships behind `--experimental`: integration-heavy programs (marginfi's
+ * drift/juplend/kamino adapters) legitimately take external programs' vaults
+ * unbound, so this rule's real-world precision is below the default-set bar.
+ * It catches the Cashio pattern; use it for deep manual reviews.
+ */
+const unboundTokenMint: Rule = {
+  id: "SOL-013",
+  name: "Token Account Not Bound to Mint",
+  severity: "MEDIUM",
+  description:
+    "A token-account field and a mint field coexist in the same Accounts struct, but the token account is never bound to the mint (`token::mint = ...`, `associated_token::mint = ...`, or a constraint/address pin). The instruction may accept a token account of an unintended mint — the vulnerability class behind the Cashio infinite-mint exploit. Bind the token account to the mint in the `#[account(...)]` constraint.",
+  check(fileContent, filePath) {
+    const findings: Finding[] = [];
+    const lines = splitLines(fileContent);
+    const model = getConstraintModel(fileContent);
+
+    for (const s of model.structs) {
+      const mintFields = s.fields.filter((f) => f.isMint);
+      if (mintFields.length === 0) continue;
+
+      for (const f of s.fields) {
+        if (!f.isTokenAccount) continue;
+        if (f.bindsTokenMint || f.hasInit || f.validated) continue;
+
+        findings.push(
+          makeFinding(
+            unboundTokenMint,
+            filePath,
+            f.line,
+            lines[f.line - 1] || f.name,
+            `\`${f.name}\` is a TokenAccount but is never bound to a mint, although this instruction also takes a mint account (${mintFields
+              .map((m) => `\`${m.name}\``)
+              .join(", ")}). Add \`token::mint = ${mintFields[0].name}\` (and usually \`token::authority\`) to the field's #[account(...)] constraint so a token account of an unintended mint is rejected.`
+          )
+        );
+      }
+    }
+
+    return findings;
+  },
+};
+
 export const rules: Rule[] = [
   missingSignerCheck,
   uncheckedDeserialization,
@@ -585,6 +792,6 @@ export const rules: Rule[] = [
  * Opt-in rules that are too noisy for the default ruleset (see each rule's
  * comment). Included only when the CLI is run with `--experimental`.
  */
-export const experimentalRules: Rule[] = [duplicateMutableAccounts];
+export const experimentalRules: Rule[] = [duplicateMutableAccounts, unboundTokenMint];
 
 export default rules;

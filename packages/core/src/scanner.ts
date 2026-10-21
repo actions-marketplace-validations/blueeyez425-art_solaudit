@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Finding, Rule, ScanResult } from "./types";
+import { isTestLikePath } from "./anchor";
 
 /**
  * Run every rule against source that is already in memory (no filesystem access).
@@ -29,18 +30,46 @@ export function scanFile(filePath: string, rules: Rule[]): Finding[] {
   return scanContent(content, filePath, rules);
 }
 
-function walk(dirPath: string, files: string[] = []): string[] {
+/**
+ * Directories skipped by default: test suites, fuzz harnesses, fixtures and
+ * example code. Findings there are almost never actionable on-chain signal
+ * (in real-world scans they accounted for a meaningful share of pure noise).
+ * `--include-tests` restores the old behavior.
+ */
+const EXCLUDED_DIR_NAMES = new Set([
+  "tests",
+  "test",
+  "test-utils",
+  "test_utils",
+  "testing",
+  "fuzz",
+  "fixtures",
+  "fixture",
+  "benches",
+  "benchmarks",
+  "examples",
+  "example",
+]);
+
+function walk(dirPath: string, files: string[] = [], includeTests = false, rootPath?: string): string[] {
+  const root = rootPath ?? dirPath;
   const entries = readdirSync(dirPath);
 
   for (const entry of entries) {
     if (entry === "node_modules" || entry === "target" || entry === ".git") continue;
+    if (!includeTests && EXCLUDED_DIR_NAMES.has(entry.toLowerCase())) continue;
 
     const fullPath = join(dirPath, entry);
     const stat = statSync(fullPath);
 
     if (stat.isDirectory()) {
-      walk(fullPath, files);
+      walk(fullPath, files, includeTests, root);
     } else if (stat.isFile() && fullPath.endsWith(".rs")) {
+      // Test-like detection applies to the path *relative to the scan root*:
+      // exclusions trim noise from a repo walk, but never override a user who
+      // explicitly pointed the scanner at a directory named e.g. `examples`.
+      const rel = fullPath.slice(root.length).replace(/^[\/\\]/, "");
+      if (!includeTests && isTestLikePath(rel)) continue;
       files.push(fullPath);
     }
   }
@@ -95,9 +124,17 @@ function sortAndSummarize(rsFileCount: number, allFindings: Finding[]): ScanResu
 }
 
 /** Recursively scan a directory (or a single file) for .rs files and aggregate findings. */
-export async function scanDirectory(targetPath: string, rules: Rule[]): Promise<ScanResult> {
+export async function scanDirectory(
+  targetPath: string,
+  rules: Rule[],
+  opts: { includeTests?: boolean } = {}
+): Promise<ScanResult> {
   const stat = statSync(targetPath);
-  const rsFiles = stat.isDirectory() ? walk(targetPath) : targetPath.endsWith(".rs") ? [targetPath] : [];
+  const rsFiles = stat.isDirectory()
+    ? walk(targetPath, [], opts.includeTests ?? false)
+    : targetPath.endsWith(".rs")
+      ? [targetPath]
+      : [];
 
   const allFindings: Finding[] = [];
 

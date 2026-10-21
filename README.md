@@ -44,7 +44,8 @@ solaudit [path] [options]
 | `--json` | Print raw scan results as JSON |
 | `--sarif` | Print results as SARIF 2.1.0 (for GitHub Code Scanning) |
 | `--min-severity <level>` | Only report findings at or above `CRITICAL`\|`HIGH`\|`MEDIUM`\|`LOW`\|`INFO` |
-| `--experimental` | Also run opt-in experimental rules (currently `SOL-012` Duplicate Mutable Accounts); higher signal, more false positives |
+| `--experimental` | Also run opt-in experimental rules (`SOL-012` Duplicate Mutable Accounts, `SOL-013` Token Account Not Bound to Mint); higher signal, more false positives |
+| `--include-tests` | Also scan test/fuzz/fixture/example code (skipped by default; findings there are rarely actionable) |
 | `--help` | Show usage |
 
 ### Example
@@ -54,7 +55,7 @@ $ solaudit ./examples
 ```
 
 ```
-SolAudit v0.3.0 — static analysis for Anchor/Solana programs
+SolAudit v0.3.1 — static analysis for Anchor/Solana programs
 Scanned 1 file(s) at 2026-08-27T06:00:00.000Z
 ──────────────────────────────────────────────────────────────────────
 
@@ -95,14 +96,14 @@ bun run dev
 
 | ID | Severity | Name | What it catches |
 |---|---|---|---|
-| `SOL-001` | CRITICAL | Missing Signer Check | `transfer`/`mint_to` calls made without a nearby `Signer<'info>` type or `.is_signer` check |
-| `SOL-002` | HIGH | Unchecked Account Deserialization | `Account::try_from` / `AccountLoader::try_from` used without a validating `#[account(...)]` constraint |
+| `SOL-001` | CRITICAL | Missing Signer Check | `transfer`/`mint_to` calls with no signer evidence anywhere: no nearby `is_signer` check, no `Signer<'info>` field on the governing Accounts struct, and no PDA signing (`invoke_signed` / `new_with_signer`) |
+| `SOL-002` | HIGH | Unchecked Account Deserialization | `Account::try_from` / `AccountLoader::try_from` on an account with no validating `#[account(...)]` constraint (constraint-aware: fields carrying `owner`/`constraint`/`has_one` bindings are recognized as validated) |
 | `SOL-003` | HIGH | Arbitrary CPI | `invoke`/`invoke_signed` targeting a program ID sourced from a caller-supplied account instead of a verified constant |
-| `SOL-004` | HIGH | Missing Bump Seed Canonicalization | `create_program_address` used directly, or `find_program_address`'s bump discarded instead of stored/validated |
-| `SOL-005` | MEDIUM | Integer Overflow Risk | Raw `+`/`-`/`*` arithmetic on balance-like fields instead of `checked_*`/`saturating_*` |
+| `SOL-004` | HIGH | Missing Bump Seed Canonicalization | `create_program_address` called directly with a bump that didn't come from a nearby `find_program_address` (which is canonical by construction) |
+| `SOL-005` | MEDIUM | Integer Overflow Risk | Raw `+`/`-`/`*` arithmetic *written into account state* (field/compound assignment) on balance-like values instead of `checked_*`/`saturating_*` |
 | `SOL-006` | HIGH | Type Cosplay / Missing Discriminator Check | Manual `try_from_slice` deserialization with no discriminator validation or `Account<'info, T>` wrapper |
 | `SOL-007` | MEDIUM | Insecure Account Initialization | `#[account(init, ...)]` constraints missing `payer` and/or `space` |
-| `SOL-008` | LOW | Missing Owner Check | Raw `AccountInfo` fields used without a nearby `.owner` comparison |
+| `SOL-008` | LOW | Missing Owner Check | Raw `AccountInfo`/`UncheckedAccount` fields with no constraint binding whose data is trusted (deserialized/read) or whose key is assigned into persistent state, with no `.owner` check anywhere in the file |
 | `SOL-009` | HIGH | Insecure Manual Account Closure | An account's lamports manually drained to zero without discriminator zeroing or owner reassignment (unlike Anchor's `close = destination`), enabling closed-account revival |
 | `SOL-010` | MEDIUM | Reinitialization Risk via init_if_needed | `#[account(init_if_needed, ...)]` without canonical PDA seeds / `has_one` constraints, letting a pre-existing attacker-crafted account pass as freshly initialized |
 | `SOL-011` | MEDIUM | Missing Rent-Exemption Check | A partial lamport withdrawal with no nearby `Rent::get()?.minimum_balance(...)` check, risking runtime garbage-collection of the account |
@@ -111,16 +112,26 @@ Each rule is implemented as real regex/line-scanning logic in [`packages/core/sr
 
 ## Accuracy
 
-On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic engine scores **94.1% precision, 100% recall, 97.0% F1** on rule-covered categories.
+On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic engine scores **100% precision, 100% recall, 100% F1** on rule-covered categories.
 
-**Duplicate mutable accounts** is covered by the experimental `SOL-012` rule, available via `solaudit --experimental`. A “distinctness” heuristic false-positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type with no explicit `!=` constraint), so it stays opt-in to protect the default ruleset's precision. These numbers describe this suite, not general security effectiveness.
+### Real-world validation (0.3.1)
+
+0.3.0 was scanned against 9 major open-source protocols (marginfi, Drift, Orca Whirlpools, Marinade, Squads, Phoenix, Clockwork, Saber, and Cashio — the real $50M exploit, as a control). The result drove a rewrite of how the engine reads Anchor code: it now parses `#[derive(Accounts)]` structs and understands the constraint layer (`Signer`, `owner`/`has_one`/`constraint`/`seeds`, handler `Context<T>` mapping, `#[cfg(test)]` exclusion), instead of pattern-matching handler bodies alone.
+
+- **Default findings across the 9 repos dropped from 1,232 to 158 (−87%)** — marginfi went from 521 findings to 20; Drift from 454 to 77.
+- The remaining findings are *more* actionable, not fewer ideas: suppressions only happen on positive evidence of validation.
+- Under `--experimental`, the new `SOL-013` rule fires on Cashio's actual vulnerable pattern — a token account whose mint is never bound despite a mint account being in scope (the class behind the infinite-mint exploit).
+
+Benchmark label integrity note: three samples' labels were revised in 0.3.1 to match SOL-008's sharpened definition (raw accounts whose *data* is trusted or whose key is *assigned into state*); each revision is documented inline in [`benchmark/labels.json`](./benchmark/labels.json).
+
+**Duplicate mutable accounts** and **token accounts unbound to their mint** (the Cashio class) are covered by the experimental `SOL-012` and `SOL-013` rules, available via `solaudit --experimental`. A “distinctness” heuristic false-positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type with no explicit `!=` constraint), so it stays opt-in to protect the default ruleset's precision. These numbers describe this suite, not general security effectiveness.
 
 ## Output formats (CLI)
 
 - **Human** (default) — colorized terminal report grouped by severity.
 - **JSON** (`--json`) — the full `ScanResult` object (`scannedFiles`, `findings[]`, `summary`).
 - **SARIF** (`--sarif`) — [SARIF 2.1.0](https://sarifweb.azurewebsites.net/) output compatible with GitHub Code Scanning.
-- **Experimental rules** (`--experimental`) — opt into noisier, higher-signal heuristics (currently `SOL-012` Duplicate Mutable Accounts). Recommended for deep manual reviews rather than CI gates.
+- **Experimental rules** (`--experimental`) — opt into noisier, higher-signal heuristics (`SOL-012` Duplicate Mutable Accounts, `SOL-013` Token Account Not Bound to Mint). Recommended for deep manual reviews rather than CI gates.
 
 ## GitHub Actions
 

@@ -53,9 +53,11 @@ Baseline (deterministic rule engine, `bun benchmark/harness/run_baseline.ts`):
 
 | Metric | Result |
 |---|---|
-| Precision | 94.1% |
+| Precision | 100.0% |
 | Recall | 100.0% |
-| F1 | 97.0% |
+
+_(0.3.1: three samples' labels were revised to match SOL-008's sharpened definition — raw accounts whose data is trusted or whose key is assigned into state. The revisions are documented inline in `labels.json`. The rule previously fired on any unconstrained raw `AccountInfo` usage, which real-world scanning showed was mostly noise.)_
+| F1 | 100.0% |
 | Known gaps correctly left undetected (as expected) | 0/1 |
 
 The one false positive is a real, documented limitation of `SOL-001`'s
