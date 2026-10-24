@@ -55,7 +55,7 @@ $ solaudit ./examples
 ```
 
 ```
-SolAudit v0.3.1 — static analysis for Anchor/Solana programs
+SolAudit v0.3.2 — static analysis for Anchor/Solana programs
 Scanned 1 file(s) at 2026-08-27T06:00:00.000Z
 ──────────────────────────────────────────────────────────────────────
 
@@ -96,15 +96,15 @@ bun run dev
 
 | ID | Severity | Name | What it catches |
 |---|---|---|---|
-| `SOL-001` | CRITICAL | Missing Signer Check | `transfer`/`mint_to` calls with no signer evidence anywhere: no nearby `is_signer` check, no `Signer<'info>` field on the governing Accounts struct, and no PDA signing (`invoke_signed` / `new_with_signer`) |
+| `SOL-001` | CRITICAL | Missing Signer Check | `transfer`/`mint_to` calls with no signer evidence anywhere: no nearby `is_signer` check, no `Signer<'info>` field on the governing Accounts struct, and no PDA signing (`invoke_signed` / `new_with_signer`). Also flags PDA-signed transfers whose *destination* is a caller-supplied unchecked account with no `Signer` governing the instruction (the classic vault drain) |
 | `SOL-002` | HIGH | Unchecked Account Deserialization | `Account::try_from` / `AccountLoader::try_from` on an account with no validating `#[account(...)]` constraint (constraint-aware: fields carrying `owner`/`constraint`/`has_one` bindings are recognized as validated) |
-| `SOL-003` | HIGH | Arbitrary CPI | `invoke`/`invoke_signed` targeting a program ID sourced from a caller-supplied account instead of a verified constant |
-| `SOL-004` | HIGH | Missing Bump Seed Canonicalization | `create_program_address` called directly with a bump that didn't come from a nearby `find_program_address` (which is canonical by construction) |
-| `SOL-005` | MEDIUM | Integer Overflow Risk | Raw `+`/`-`/`*` arithmetic *written into account state* (field/compound assignment) on balance-like values instead of `checked_*`/`saturating_*` |
+| `SOL-003` | HIGH | Arbitrary CPI | `invoke`/`invoke_signed` whose program ID comes from a raw (unchecked) program account (`program_id: ctx.accounts.*` or a raw `*_program` field); typed `Program<'info, T>` targets are recognized as safe |
+| `SOL-004` | HIGH | Missing Bump Seed Canonicalization / Unverified PDA | `create_program_address` called directly with a bump that didn't come from a nearby `find_program_address` (which is canonical by construction); also raw, mutable vault/treasury/pool-style accounts used in value movement with no `seeds`/`address` binding |
+| `SOL-005` | MEDIUM | Integer Overflow Risk | Raw `+`/`-`/`*` arithmetic *written into account state* (field/compound assignment) on balance-like values instead of `checked_*`/`saturating_*`; also variable-exponent `pow()` in value math (e.g. `2u64.pow(level)` in a fee curve) |
 | `SOL-006` | HIGH | Type Cosplay / Missing Discriminator Check | Manual `try_from_slice` deserialization with no discriminator validation or `Account<'info, T>` wrapper |
 | `SOL-007` | MEDIUM | Insecure Account Initialization | `#[account(init, ...)]` constraints missing `payer` and/or `space` |
-| `SOL-008` | LOW | Missing Owner Check | Raw `AccountInfo`/`UncheckedAccount` fields with no constraint binding whose data is trusted (deserialized/read) or whose key is assigned into persistent state, with no `.owner` check anywhere in the file |
-| `SOL-009` | HIGH | Insecure Manual Account Closure | An account's lamports manually drained to zero without discriminator zeroing or owner reassignment (unlike Anchor's `close = destination`), enabling closed-account revival |
+| `SOL-008` | LOW | Missing Owner Check | Raw `AccountInfo`/`UncheckedAccount` fields with no constraint binding whose data is trusted (deserialized/read, including through `let x = &ctx.accounts.f` aliases) or whose key is assigned into persistent state, with no genuine `.owner ==` comparison; usages are scoped to the owning struct's handlers |
+| `SOL-009` | HIGH | Insecure Manual Account Closure | An account's lamports manually drained to zero (`lamports.borrow_mut() = 0` or `try_borrow_mut_lamports() = 0`) without discriminator zeroing or owner reassignment (unlike Anchor's `close = destination`), enabling closed-account revival |
 | `SOL-010` | MEDIUM | Reinitialization Risk via init_if_needed | `#[account(init_if_needed, ...)]` without canonical PDA seeds / `has_one` constraints, letting a pre-existing attacker-crafted account pass as freshly initialized |
 | `SOL-011` | MEDIUM | Missing Rent-Exemption Check | A partial lamport withdrawal with no nearby `Rent::get()?.minimum_balance(...)` check, risking runtime garbage-collection of the account |
 
@@ -123,6 +123,17 @@ On the committed labeled suite in [`benchmark/`](./benchmark), the deterministic
 - Under `--experimental`, the new `SOL-013` rule fires on Cashio's actual vulnerable pattern — a token account whose mint is never bound despite a mint account being in scope (the class behind the infinite-mint exploit).
 
 Benchmark label integrity note: three samples' labels were revised in 0.3.1 to match SOL-008's sharpened definition (raw accounts whose *data* is trusted or whose key is *assigned into state*); each revision is documented inline in [`benchmark/labels.json`](./benchmark/labels.json).
+
+### Ground-truth validation (0.3.2): SolScape
+
+0.3.1 was measured against **purpose-built ground truth**: [SolScape](https://github.com/blueeyez425-art/solaudit/tree/main/examples/solscape), a complete (intentionally vulnerable) Anchor game program — a persistent on-chain territory map with a marketplace, treasury, and player profiles — seeded with 9 real exploit classes (missing-signer treasury drain, unchecked PDA substitution, overflow price curve, arbitrary CPI, unbound token mint, close-then-revive, raw-byte trust, reinitialization) plus 4 correctly-secured control handlers. The answer key was written **before** the scan.
+
+- **0.3.1 caught 2 of 9 seeded bugs** and false-flagged 2 of 4 controls. We published that scorecard, then fixed the engine.
+- **0.3.2 catches 8 of 9 by default, 9 of 9 with `--experimental`** (the unbound-mint class is SOL-013), with **all 4 controls clean**.
+- Fixes: SOL-001 now detects PDA-signed transfers to caller-chosen unchecked recipients when no `Signer` governs the instruction (the classic vault drain); SOL-003 only flags CPIs whose *program* is a raw account (typed `Program<'info, T>` no longer flags); SOL-004 also flags unseeds-verified vault/treasury/pool accounts used in value movement; SOL-005 catches variable-exponent `pow()` in value math; SOL-008 follows `let x = &ctx.accounts.f` aliases, scopes usages to the owning struct's handlers, and no longer mistakes `field.owner = ...` assignments for checks; SOL-009 recognizes `try_borrow_mut_lamports() = 0` manual closes.
+- marginfi re-scan sanity check: 24 findings (was 20) — the main program stays clean; the new signal lands in mock/integration programs.
+
+Fixture revisions disclosed: SolScape's `withdraw_treasury` was rewritten to the genuinely exploitable `invoke_signed` shape (v1's plain `invoke` could not actually drain), `close_tile` now leaves data intact (v1 zeroed it, which is the *safe* pattern), and `buy_tile_spl` gained the realistic typed-token + mint shape SOL-013 is designed to scope to. v1 is archived in the fixture directory.
 
 **Duplicate mutable accounts** and **token accounts unbound to their mint** (the Cashio class) are covered by the experimental `SOL-012` and `SOL-013` rules, available via `solaudit --experimental`. A “distinctness” heuristic false-positives on common legitimate patterns (for example a deposit instruction’s user/vault token accounts of the same type with no explicit `!=` constraint), so it stays opt-in to protect the default ruleset's precision. These numbers describe this suite, not general security effectiveness.
 

@@ -76,12 +76,42 @@ const missingSignerCheck: Rule = {
         /#\[account\([^)]*signer[^)]*\)\]/i.test(window);
       if (hasSignerEvidence) return;
 
+      // Constraint-layer model for the enclosing handler (hoisted: both the
+      // PDA-signed-drain check below and the final Signer-field check use it).
+      const struct = structAt(model, offset);
+
       // Extended window: PDA-signed CPI and instruction-construction patterns
       // resolve the signer question at the invoke site, not the call site.
       const extWindow = lines
         .slice(windowStart, Math.min(lines.length, idx + 16))
         .join("\n");
-      if (/\binvoke_signed\b/.test(extWindow)) return;
+      if (/\binvoke_signed\b/.test(extWindow)) {
+        // PDA-signed value movement: the program itself signs, so the runtime
+        // no longer requires any caller signature. That is safe only when the
+        // destination comes from validated state — if the transfer's `to` is a
+        // caller-supplied unchecked account and no Signer governs the
+        // instruction, anyone can call it and drain the vault to themselves.
+        if (struct && !struct.fields.some((f) => f.isSignerTyped)) {
+          const callBlock = lines.slice(idx, Math.min(lines.length, idx + 8)).join("\n");
+          if (/system_instruction::transfer|::transfer(?:_checked)?\s*\(/.test(callBlock)) {
+            const refs = [...callBlock.matchAll(/ctx\.accounts\.(\w+)/g)].map((m) => m[1]);
+            // system_instruction::transfer(from, to, amount) — refs[1] is `to`.
+            const toField = refs.length >= 2 ? findField(model, refs[1]) : null;
+            if (toField && toField.isRaw && !toField.validated) {
+              findings.push(
+                makeFinding(
+                  missingSignerCheck,
+                  filePath,
+                  idx + 1,
+                  rawLine,
+                  `This instruction PDA-signs a transfer whose destination (\`${refs[1]}\`) is a caller-supplied unchecked account, and its Accounts struct has no Signer — anyone can call it and drain the vault. Require an authority Signer and bind the recipient to validated state.`
+                )
+              );
+            }
+          }
+        }
+        return;
+      }
       if (/\bnew_with_signer\b/.test(extWindow)) return;
       // Instruction construction passed to invoke()/invoke_signed: the runtime
       // enforces that the `from` account signed the transaction (or is PDA-
@@ -102,7 +132,6 @@ const missingSignerCheck: Rule = {
       // Constraint-layer awareness: if the governing Accounts struct (from the
       // enclosing handler's Context<T> or impl block) declares a Signer field,
       // Anchor rejects unsigned transactions at deserialization time.
-      const struct = structAt(model, offset);
       if (struct && struct.fields.some((f) => f.isSignerTyped)) return;
 
       findings.push(
@@ -176,20 +205,42 @@ const arbitraryCpi: Rule = {
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
-    const cpiPattern = /\b(invoke|invoke_signed)\s*\(/;
+    const cpiPattern = /\b(?:invoke|invoke_signed)\s*\(/;
+    const model = getConstraintModel(fileContent);
 
     lines.forEach((line, idx) => {
       if (!cpiPattern.test(line)) return;
+      const offset = lineOffset(lines, idx);
+      if (inRanges(offset, model.testRanges)) return;
 
-      const windowStart = Math.max(0, idx - 3);
-      const windowEnd = Math.min(lines.length, idx + 4);
-      const window = lines.slice(windowStart, windowEnd).join("\n");
+      const windowStart = Math.max(0, idx - 12);
+      const windowEnd = Math.min(lines.length, idx + 12);
+      const window = stripLineComments(lines.slice(windowStart, windowEnd).join("\n"));
 
-      const usesAccountsAsProgram =
-        /ctx\.accounts\.\w+\.(to_account_info\(\)|key\(\))/.test(window) &&
-        !/Program<\s*'info/.test(window);
+      // The CPI target is substitutable only when the *program* is sourced
+      // from an account. Two shapes:
+      //   1. `program_id: ctx.accounts.<name>...` in an Instruction literal
+      //   2. a program-named account (`token_program`, `amm_program`, ...)
+      //      passed into the CPI or to an instruction builder
+      // Transfer arguments like `ctx.accounts.user.key()` are NOT program ids
+      // and must not flag — that was the 0.3.1 false-positive source.
+      const suspectNames = new Set<string>();
+      for (const m of window.matchAll(/program_id\s*:\s*[*&]?\s*(?:ctx\.accounts\.)?(\w+)/g)) {
+        suspectNames.add(m[1]);
+      }
+      for (const m of window.matchAll(/ctx\.accounts\.(\w*(?:^|_)program\w*)/g)) {
+        suspectNames.add(m[1]);
+      }
 
-      if (usesAccountsAsProgram) {
+      for (const name of suspectNames) {
+        const field = findField(model, name);
+        // Typed `Program<'info, T>` accounts are validated by Anchor — safe.
+        if (field && field.wrapperType === "Program") continue;
+        // A non-program raw field that merely shares a name suffix (rare) is
+        // still suspicious only if it's raw; typed accounts are checked.
+        if (field && !field.isRaw) continue;
+        if (!field && /Program<\s*'info/.test(window)) continue; // non-Anchor fallback
+
         findings.push(
           makeFinding(
             arbitraryCpi,
@@ -199,6 +250,7 @@ const arbitraryCpi: Rule = {
             "Validate the target program ID against a known constant (e.g. `token_program.key() == spl_token::ID`) or type the account as `Program<'info, T>` before invoking it."
           )
         );
+        break; // one finding per CPI site
       }
     });
 
@@ -245,6 +297,59 @@ const missingBumpCanonicalization: Rule = {
       );
     });
 
+    // PDA substitution: a raw, mutable, unconstrained field named like a value
+    // vault (treasury/vault/pool/escrow/...) participating in lamport movement.
+    // Without a `seeds`/`address` binding, the caller can substitute any
+    // account — draining it, or redirecting fees to themselves.
+    if (model.structs.length > 0) {
+      const offsets: number[] = [];
+      let acc = 0;
+      for (const l of lines) {
+        offsets.push(acc);
+        acc += l.length + 1;
+      }
+
+      for (const s of model.structs) {
+        const regions = model.regions.filter((r) => r.contextType === s.name);
+        const regionText =
+          regions.length > 0
+            ? regions.map((r) => fileContent.slice(r.start, r.end)).join("\n")
+            : fileContent;
+        const movesValue =
+          /system_instruction::transfer|token::transfer|try_borrow_mut_lamports|lamports\.borrow_mut/.test(
+            stripLineComments(regionText)
+          );
+        if (!movesValue) continue;
+
+        const inScope = (lineIdx: number) => {
+          if (regions.length === 0) return true;
+          const off = offsets[lineIdx];
+          return regions.some((r) => off >= r.start && off < r.end);
+        };
+
+        for (const f of s.fields) {
+          if (!f.isRaw || f.validated) continue;
+          if (!/\bmut\b/.test(f.attrs)) continue;
+          if (!/vault|treasury|pool|escrow|fund|bank|reward/i.test(f.name)) continue;
+
+          for (let i = 0; i < lines.length; i++) {
+            if (!inScope(i)) continue;
+            if (!lines[i].includes(`ctx.accounts.${f.name}`)) continue;
+            findings.push(
+              makeFinding(
+                missingBumpCanonicalization,
+                filePath,
+                i + 1,
+                lines[i],
+                `\`${f.name}\` is a mutable unchecked account used in value movement with no \`seeds\` binding. Verify it against its derived PDA (\`seeds = [...], bump\`) or pin it with \`address =\` — otherwise the caller can substitute an attacker-controlled account and redirect the funds.`
+              )
+            );
+            break; // once per field
+          }
+        }
+      }
+    }
+
     return findings;
   },
 };
@@ -286,6 +391,21 @@ const integerOverflowRisk: Rule = {
             idx + 1,
             line,
             "Replace raw arithmetic written to state with `.checked_add()/.checked_sub()/.checked_mul()` (propagating errors via `ok_or(ErrorCode::MathOverflow)?`) or `saturating_*` equivalents."
+          )
+        );
+      }
+
+      // Variable-exponent exponentiation in value math: `2u64.pow(level)`
+      // wraps a u64 at modest exponents — the classic fee/curve overflow.
+      // (Constant exponents like `10u64.pow(9)` are deliberate and skipped.)
+      if (/\.pow\s*\([^)]*[a-zA-Z_]/.test(code) && !/checked_pow|saturating|wrapping/.test(code)) {
+        findings.push(
+          makeFinding(
+            integerOverflowRisk,
+            filePath,
+            idx + 1,
+            line,
+            "Exponentiation with a non-constant exponent overflows silently and quickly (2^64 wraps a u64 to 0). Use `checked_pow` with error propagation, or bound the exponent explicitly."
           )
         );
       }
@@ -390,75 +510,86 @@ const missingOwnerCheck: Rule = {
     const model = getConstraintModel(fileContent);
 
     if (model.structs.length > 0) {
-      // Constraint-aware path: only fields with NO validation anywhere count.
-      // A field is considered validated if any same-named declaration in the
-      // file carries an owner/constraint/has_one/address binding, or an owner
-      // comparison on the field appears anywhere in the file.
-      const validatedNames = new Set<string>();
-      for (const s of model.structs) {
-        for (const f of s.fields) {
-          if (f.validated) validatedNames.add(f.name);
+      // Constraint-aware path: evaluate each raw field within the handlers its
+      // owning struct governs. Validated = its own declaration carries an
+      // owner/constraint/has_one/address/seeds binding, or a genuine owner
+      // *comparison* on it exists in the file. (An assignment like
+      // `tile.owner = ...` is NOT a check — 0.3.1's cross-struct name matching
+      // both suppressed real findings and reported them at the wrong site.)
+      const codeOnly = stripLineComments(fileContent);
+      const offsets: number[] = [];
+      {
+        let off = 0;
+        for (const l of lines) {
+          offsets.push(off);
+          off += l.length + 1;
         }
       }
 
-      const suspects = new Map<string, number>(); // name -> declaration line
-      for (const s of model.structs) {
-        for (const f of s.fields) {
-          if (!f.isRaw || validatedNames.has(f.name)) continue;
-          if (new RegExp(`\\b${f.name}\\s*\\.owner\\b`).test(stripLineComments(fileContent))) {
-            continue; // manual owner check exists somewhere in the file
-          }
-          if (!suspects.has(f.name)) suspects.set(f.name, f.line);
-        }
-      }
+      const touchPattern =
+        /try_borrow_data|try_borrow_mut_data|try_borrow_mut_lamports|\.load\s*\(|data\.borrow|try_from|\.lamports\s*\(\s*\)|accessor::/;
 
-      // Report once per field, at its first use (falling back to declaration).
-      for (const [name, declLine] of suspects) {
-        const usagePattern = new RegExp(`ctx\\.accounts\\.${name}\\b`);
-        let reportLine = declLine;
-        let snippet = lines[declLine - 1] || name;
-        let touchesData = false;
-        for (let i = 0; i < lines.length; i++) {
-          if (!usagePattern.test(lines[i]) || i + 1 === declLine) continue;
-          if (reportLine === declLine) {
-            reportLine = i + 1;
-            snippet = lines[i];
+      for (const s of model.structs) {
+        const regions = model.regions.filter((r) => r.contextType === s.name);
+        const inScope = (lineIdx: number) => {
+          if (regions.length === 0) return true;
+          const off = offsets[lineIdx];
+          return regions.some((r) => off >= r.start && off < r.end);
+        };
+
+        for (const f of s.fields) {
+          if (!f.isRaw || f.validated) continue;
+
+          // Genuine manual owner check (comparison / require), not assignment.
+          const ownerCheck = new RegExp(
+            `\\b${f.name}\\.owner\\s*==|require!\\([^)]*\\b${f.name}\\.owner\\b|require_keys_eq!\\([^)]*\\b${f.name}\\b`
+          );
+          if (ownerCheck.test(codeOnly)) continue;
+
+          // Aliases: `let x = &ctx.accounts.<field>;` — the dangerous method
+          // calls often happen on the alias, not on `ctx.accounts.<field>`.
+          const aliases = new Set<string>();
+          const aliasRe = new RegExp(
+            `let\\s+(\\w+)\\s*=\\s*&?\\s*ctx\\.accounts\\.${f.name}\\b`,
+            "g"
+          );
+          let am: RegExpExecArray | null;
+          while ((am = aliasRe.exec(codeOnly)) !== null) aliases.add(am[1]);
+
+          let reportLine = -1;
+          let snippet = "";
+          for (let i = 0; i < lines.length; i++) {
+            if (!inScope(i)) continue;
+            const l = lines[i];
+            const direct = l.includes(`ctx.accounts.${f.name}`);
+            const aliasTouch = [...aliases].some(
+              (a) => new RegExp(`\\b${a}\\s*\\.`).test(l) && touchPattern.test(l)
+            );
+            const directTouch = direct && touchPattern.test(l);
+            // Assigning an unvalidated account's key into persistent state
+            // asserts the identity of an account nothing has checked.
+            const keyAssign =
+              direct &&
+              new RegExp(`=\\s*&?\\s*ctx\\.accounts\\.${f.name}\\.key\\s*\\(`).test(l) &&
+              !/==|require_keys_eq/.test(l);
+            if (aliasTouch || directTouch || keyAssign) {
+              reportLine = i + 1;
+              snippet = l;
+              break;
+            }
           }
-          // Reading account *data* is the dangerous usage; key comparisons and
-          // CPI pass-throughs are validated elsewhere (or by the callee).
-          if (
-            /try_borrow_data|\.load\s*\(|data\.borrow|try_from|\.lamports\s*\(|accessor::/.test(
-              lines[i]
+          if (reportLine === -1) continue; // declared but never dangerously used
+
+          findings.push(
+            makeFinding(
+              missingOwnerCheck,
+              filePath,
+              reportLine,
+              snippet,
+              `\`${f.name}\` is a raw AccountInfo with no constraint binding. Add an explicit \`require!(ctx.accounts.${f.name}.owner == &expected_program_id, ErrorCode::InvalidOwner)\` check (or an \`#[account(owner = ...)]\` constraint) before trusting its data.`
             )
-          ) {
-            touchesData = true;
-            reportLine = i + 1;
-            snippet = lines[i];
-          }
-          // Assigning an unvalidated account's key into persistent state
-          // (e.g. `bank.curator = ctx.accounts.admin.key()`) asserts the
-          // identity of an account nothing has checked — worth review.
-          // Comparisons (`==`, require_keys_eq) and CPI args are fine.
-          if (
-            new RegExp(`=\\s*(?:&)?ctx\\.accounts\\.${name}\\.key\\s*\\(`).test(lines[i]) &&
-            !/==|require_keys_eq/.test(lines[i])
-          ) {
-            touchesData = true;
-            reportLine = i + 1;
-            snippet = lines[i];
-          }
+          );
         }
-        if (reportLine === declLine) continue; // declared but never dereferenced via ctx.accounts
-        if (!touchesData) continue; // key-only / CPI pass-through usage
-        findings.push(
-          makeFinding(
-            missingOwnerCheck,
-            filePath,
-            reportLine,
-            snippet,
-            `\`${name}\` is a raw AccountInfo with no constraint binding. Add an explicit \`require!(ctx.accounts.${name}.owner == &expected_program_id, ErrorCode::InvalidOwner)\` check (or an \`#[account(owner = ...)]\` constraint) before trusting its data.`
-          )
-        );
       }
 
       return findings;
@@ -515,7 +646,8 @@ const insecureAccountClosure: Rule = {
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
-    const zeroLamportsPattern = /\.lamports\.borrow_mut\(\)\s*=\s*0\s*;/;
+    const zeroLamportsPattern =
+      /(?:\.lamports\.borrow_mut\(\)|\.try_borrow_mut_lamports\(\)\??)\s*=\s*0\s*;/;
 
     lines.forEach((line, idx) => {
       if (!zeroLamportsPattern.test(line)) return;

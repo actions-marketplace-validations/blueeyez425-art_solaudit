@@ -422,3 +422,248 @@ describe("constraint-layer awareness (0.3.1)", () => {
     expect(findings.length).toBe(0);
   });
 });
+
+describe("0.3.2 — SolScape ground-truth regression tests", () => {
+  test("SOL-001: flags PDA-signed transfer to a caller-chosen raw recipient with no Signer in scope", () => {
+    const src = `
+      pub fn withdraw_treasury(ctx: Context<WithdrawTreasury>, amount: u64, bump: u8) -> Result<()> {
+        let ix = system_instruction::transfer(
+          &ctx.accounts.treasury.key(),
+          &ctx.accounts.recipient.key(),
+          amount,
+        );
+        invoke_signed(&ix, &[ctx.accounts.treasury.to_account_info()], &[&[b"treasury", &[bump]]])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct WithdrawTreasury<'info> {
+        #[account(mut)]
+        pub treasury: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub recipient: UncheckedAccount<'info>,
+        pub authority: UncheckedAccount<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-001").check(src, "test.rs");
+    expect(findings.length).toBeGreaterThan(0);
+  });
+
+  test("SOL-001: does not flag PDA-signed payout when a Signer governs the instruction", () => {
+    const src = `
+      pub fn withdraw(ctx: Context<Withdraw>, amount: u64, bump: u8) -> Result<()> {
+        let ix = system_instruction::transfer(
+          &ctx.accounts.vault.key(),
+          &ctx.accounts.recipient.key(),
+          amount,
+        );
+        invoke_signed(&ix, &[ctx.accounts.vault.to_account_info()], &[&[b"vault", &[bump]]])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Withdraw<'info> {
+        #[account(mut, seeds = [b"vault"], bump)]
+        pub vault: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub recipient: UncheckedAccount<'info>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-001").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-003: does not flag CPI whose program account is typed Program<'info, T>", () => {
+    const src = `
+      pub fn deposit(ctx: Context<Deposit>) -> Result<()> {
+        let ix = system_instruction::transfer(
+          &ctx.accounts.user.key(),
+          &ctx.accounts.vault.key(),
+          100,
+        );
+        invoke(&ix, &[
+          ctx.accounts.user.to_account_info(),
+          ctx.accounts.vault.to_account_info(),
+          ctx.accounts.system_program.to_account_info(),
+        ])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Deposit<'info> {
+        #[account(mut)]
+        pub user: Signer<'info>,
+        /// CHECK: vault PDA
+        #[account(mut, seeds = [b"vault"], bump)]
+        pub vault: UncheckedAccount<'info>,
+        pub system_program: Program<'info, System>,
+      }
+    `;
+    const findings = ruleById("SOL-003").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-003: flags CPI when a raw program-named account supplies the target", () => {
+    const src = `
+      pub fn buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
+        let ix = spl_token_transfer(&ctx.accounts.token_program.key(), &a, &b, &c, amount);
+        invoke(&ix, &[
+          ctx.accounts.buyer_token.to_account_info(),
+          ctx.accounts.token_program.to_account_info(),
+        ])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Buy<'info> {
+        #[account(mut)]
+        pub buyer_token: UncheckedAccount<'info>,
+        /// CHECK: intentionally unchecked
+        pub token_program: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub buyer: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-003").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+
+  test("SOL-004: flags an unseeds-verified treasury account used in value movement", () => {
+    const src = `
+      pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
+        let ix = system_instruction::transfer(
+          &ctx.accounts.treasury.key(),
+          &ctx.accounts.recipient.key(),
+          amount,
+        );
+        invoke_signed(&ix, &[ctx.accounts.treasury.to_account_info()], &[&[b"treasury", &[255]]])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Withdraw<'info> {
+        #[account(mut)]
+        pub treasury: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub recipient: UncheckedAccount<'info>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-004").check(src, "test.rs");
+    expect(findings.some((f) => f.description.includes("seeds"))).toBe(true);
+  });
+
+  test("SOL-004: does not flag a seeds-bound treasury PDA", () => {
+    const src = `
+      pub fn claim(ctx: Context<Claim>) -> Result<()> {
+        let ix = system_instruction::transfer(
+          &ctx.accounts.player.key(),
+          &ctx.accounts.treasury.key(),
+          10,
+        );
+        invoke(&ix, &[ctx.accounts.player.to_account_info(), ctx.accounts.treasury.to_account_info()])?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Claim<'info> {
+        /// CHECK: treasury PDA
+        #[account(mut, seeds = [b"treasury"], bump)]
+        pub treasury: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub player: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-004").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-005: flags variable-exponent pow in value math", () => {
+    const src = `let fee = BASE * 2u64.pow(tile.level as u32) * count;`;
+    const findings = ruleById("SOL-005").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+
+  test("SOL-005: does not flag constant-exponent pow", () => {
+    const src = `const LAMPORTS: u64 = 10u64.pow(9);`;
+    const findings = ruleById("SOL-005").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-008: flags data reads through an alias of an unconstrained raw field", () => {
+    const src = `
+      pub fn buy_tile(ctx: Context<BuyTile>) -> Result<()> {
+        let tile_info = &ctx.accounts.tile;
+        let data = tile_info.try_borrow_data()?;
+        let price = u64::from_le_bytes(data[43..51].try_into().unwrap());
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct BuyTile<'info> {
+        /// CHECK: raw
+        #[account(mut)]
+        pub tile: UncheckedAccount<'info>,
+        #[account(mut)]
+        pub buyer: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-008").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+
+  test("SOL-008: does not flag when a genuine owner comparison exists", () => {
+    const src = `
+      pub fn read(ctx: Context<Read>) -> Result<()> {
+        require!(ctx.accounts.tile.owner == &crate::ID, ErrorCode::InvalidOwner);
+        let data = ctx.accounts.tile.try_borrow_data()?;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Read<'info> {
+        /// CHECK: manually owner-checked
+        pub tile: UncheckedAccount<'info>,
+        pub authority: Signer<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-008").check(src, "test.rs");
+    expect(findings.length).toBe(0);
+  });
+
+  test("SOL-008: does not report a raw field's usage inside an unrelated struct's handler", () => {
+    const src = `
+      pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        ctx.accounts.config.authority = ctx.accounts.authority.key();
+        Ok(())
+      }
+      pub fn drain(ctx: Context<Drain>) -> Result<()> {
+        **ctx.accounts.treasury.try_borrow_mut_lamports()? = 0;
+        Ok(())
+      }
+      #[derive(Accounts)]
+      pub struct Initialize<'info> {
+        #[account(mut)]
+        pub config: Account<'info, Config>,
+        #[account(mut)]
+        pub authority: Signer<'info>,
+      }
+      #[derive(Accounts)]
+      pub struct Drain<'info> {
+        #[account(mut)]
+        pub treasury: UncheckedAccount<'info>,
+        pub authority: UncheckedAccount<'info>,
+      }
+    `;
+    const findings = ruleById("SOL-008").check(src, "test.rs");
+    // Only Drain.treasury may be flagged, and only at its own usage site.
+    expect(findings.length).toBe(1);
+    expect(findings[0].snippet).toContain("treasury");
+  });
+
+  test("SOL-009: flags try_borrow_mut_lamports manual close without data zeroing", () => {
+    const src = `
+      pub fn close_tile(ctx: Context<CloseTile>) -> Result<()> {
+        let tile_info = &ctx.accounts.tile;
+        **tile_info.try_borrow_mut_lamports()? = 0;
+        **ctx.accounts.dest.try_borrow_mut_lamports()? += 5;
+        Ok(())
+      }
+    `;
+    const findings = ruleById("SOL-009").check(src, "test.rs");
+    expect(findings.length).toBe(1);
+  });
+});
