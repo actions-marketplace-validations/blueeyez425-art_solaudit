@@ -40,7 +40,7 @@ runs:
       shell: bash
       run: |
         INSTALL_DIR=$(mktemp -d)
-        npm install --no-save --prefix "$INSTALL_DIR" solaudit@0.3.1 --silent
+        npm install --no-save --prefix "$INSTALL_DIR" solaudit@0.3.2 --silent
         echo "SOLAUDIT_BIN=$INSTALL_DIR/node_modules/.bin/solaudit" >> "$GITHUB_ENV"
 
     - name: Run SolAudit
