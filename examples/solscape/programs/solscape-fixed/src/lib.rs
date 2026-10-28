@@ -20,7 +20,7 @@ use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::system_instruction;
 use anchor_spl::token::{self, Mint, Token, TokenAccount};
 
-declare_id!("So1Scape11111111111111111111111111111111111");
+declare_id!("81CG5b4NMn8hgGPfYQXDzx5b4KBe4MC31JUYvVnn8h1Q");
 
 pub const GRID_SIZE: u8 = 100;
 pub const CLAIM_FEE_LAMPORTS: u64 = 10_000_000; // 0.01 SOL
@@ -140,7 +140,7 @@ pub mod solscape {
         // Buyer pays via system program: royalty → treasury, proceeds → seller.
         for (dest, amount) in [
             (&ctx.accounts.treasury, royalty),
-            (&ctx.accounts.seller, seller_proceeds),
+            (&ctx.accounts.owner, seller_proceeds),
         ] {
             if amount > 0 {
                 let ix = system_instruction::transfer(
@@ -248,7 +248,7 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 pub struct RegisterPlayer<'info> {
     // FIX B1: init only — existing profiles are untouchable here.
-    #[account(init, payer = player, space = 8 + 32 + 8 + 4, seeds = [b"player", player.key().as_ref()], bump)]
+    #[account(init, payer = player, space = 8 + 32 + 8 + 4, seeds = [b"player".as_slice(), player.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     #[account(mut)]
     pub player: Signer<'info>,
@@ -260,9 +260,9 @@ pub struct RegisterPlayer<'info> {
 pub struct ClaimTile<'info> {
     #[account(seeds = [b"config"], bump)]
     pub config: Account<'info, Config>,
-    #[account(init, payer = player, space = 8 + 32 + 1 + 1 + 1 + 8, seeds = [b"tile", &[x], &[y]], bump)]
+    #[account(init, payer = player, space = 8 + 32 + 1 + 1 + 1 + 8, seeds = [b"tile".as_slice(), x.to_le_bytes().as_slice(), y.to_le_bytes().as_slice()], bump)]
     pub tile: Account<'info, Tile>,
-    #[account(mut, seeds = [b"player", player.key().as_ref()], bump, has_one = owner)]
+    #[account(mut, seeds = [b"player".as_slice(), player.key().as_ref()], bump, has_one = owner)]
     pub profile: Account<'info, PlayerProfile>,
     /// CHECK: treasury PDA — verified via seeds
     #[account(mut, seeds = [b"treasury"], bump)]
@@ -279,7 +279,7 @@ pub struct ClaimTile<'info> {
 pub struct UpgradeTile<'info> {
     #[account(mut, has_one = owner)]
     pub tile: Account<'info, Tile>,
-    #[account(seeds = [b"player", owner.key().as_ref()], bump)]
+    #[account(seeds = [b"player".as_slice(), owner.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     /// CHECK: treasury PDA — verified via seeds (was unbound in the fixture)
     #[account(mut, seeds = [b"treasury"], bump)]
@@ -303,12 +303,12 @@ pub struct ListTile<'info> {
 pub struct BuyTile<'info> {
     #[account(seeds = [b"config"], bump)]
     pub config: Account<'info, Config>,
-    // FIX B3: typed + PDA-verified + seller bound to tile.owner
-    #[account(mut, seeds = [b"tile", &[tile.x], &[tile.y]], bump, has_one = seller)]
+    // FIX B3: typed + PDA-verified + seller bound to tile.owner via has_one
+    #[account(mut, seeds = [b"tile".as_slice(), tile.x.to_le_bytes().as_slice(), tile.y.to_le_bytes().as_slice()], bump, has_one = owner)]
     pub tile: Account<'info, Tile>,
-    /// CHECK: the current owner, paid seller_proceeds; bound via has_one
-    #[account(mut, constraint = seller.key() != treasury.key() @ GameError::AccountAliasing)]
-    pub seller: UncheckedAccount<'info>,
+    /// CHECK: the current owner (seller), paid seller_proceeds; bound via has_one
+    #[account(mut, constraint = owner.key() != treasury.key() @ GameError::AccountAliasing)]
+    pub owner: UncheckedAccount<'info>,
     /// CHECK: treasury PDA — verified via seeds
     #[account(mut, seeds = [b"treasury"], bump)]
     pub treasury: UncheckedAccount<'info>,
@@ -382,7 +382,7 @@ pub struct GrantAchievement<'info> {
 pub struct Harvest<'info> {
     #[account(has_one = owner)]
     pub tile: Account<'info, Tile>,
-    #[account(mut, seeds = [b"player", owner.key().as_ref()], bump)]
+    #[account(mut, seeds = [b"player".as_slice(), owner.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     pub owner: Signer<'info>,
 }

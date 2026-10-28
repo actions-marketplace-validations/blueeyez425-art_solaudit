@@ -44,3 +44,10 @@ residual bug the answer key didn't plan for — a self-payment attack (passing t
 account as `buyer_token` and `seller_token`, making the SPL transfer a no-op and taking
 the tile for free). Fixed with a distinctness constraint. The scanner earning its keep
 on code we *thought* was clean is the best endorsement it could get.
+
+**Compile status (0.3.3):** both programs now compile under anchor-lang 0.32 (seed-syntax
+fixes for Anchor 0.32's homogeneous-seed-array codegen; the fixture's placeholder program
+id also contained non-base58 characters). The vulnerable fixture's bugs are untouched —
+only the syntax needed to compile changed. The hardened build additionally passes a
+15-test integration suite on a local validator, including attack-regression tests for
+every fixed class (the full workspace lives in the SolScape game project).

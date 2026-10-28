@@ -3,7 +3,7 @@ import {
   findField,
   getConstraintModel,
   inRanges,
-  isTestLikePath,
+
   lineOffset,
   stripStringLiterals,
   structAt,
@@ -364,7 +364,9 @@ const integerOverflowRisk: Rule = {
   check(fileContent, filePath) {
     const findings: Finding[] = [];
     const lines = splitLines(fileContent);
-    if (isTestLikePath(filePath)) return findings;
+    // NOTE: test-path filtering happens once at the scanner collection layer
+    // (scanner.ts, honoring --include-tests). A second guard here silently
+    // suppressed this rule even when the user opted in with --include-tests.
     const model = getConstraintModel(fileContent);
     const arithmeticPattern =
       /\b(\w*(amount|balance|supply|total|shares|stake|reserve|collateral|liquidity|principal)\w*)\s*(\+|\-|\*)\s*\w/i;

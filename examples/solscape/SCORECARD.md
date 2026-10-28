@@ -100,3 +100,5 @@ SOL-012 (experimental) flags duplicate-mutable pairs in the unchecked structs.
 Regression checks: 51/51 unit tests pass; labeled benchmark remains 100% precision /
 100% recall; marginfi re-scan 24 findings (was 20) with the main program clean —
 new signal lands in mock/integration programs.
+
+> **Note (0.3.3):** the scorecard numbers were measured with single-file scans; the directory-based reproduction command under-reported SOL-005 due to a redundant in-rule test-path guard. Fixed in 0.3.3 — the documented command now reproduces 9/9 exactly.
