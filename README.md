@@ -130,6 +130,8 @@ Benchmark label integrity note: three samples' labels were revised in 0.3.1 to m
 
 - **0.3.1 caught 2 of 9 seeded bugs** and false-flagged 2 of 4 controls. We published that scorecard, then fixed the engine.
 - **0.3.2 catches 8 of 9 by default, 9 of 9 with `--experimental`** (the unbound-mint class is SOL-013), with **all 4 controls clean**.
+
+**0.3.3 fix:** SOL-005 had a redundant in-rule test-path guard that silently skipped it whenever a target lived under an `examples/`-style path — meaning the documented SolScape reproduction command under-reported by one class. The guard is removed (filtering happens once, at the scanner layer, honoring `--include-tests`); the reproduction command now genuinely yields 9/9. Found while compiling SolScape; caught by the same fixture.
 - Fixes: SOL-001 now detects PDA-signed transfers to caller-chosen unchecked recipients when no `Signer` governs the instruction (the classic vault drain); SOL-003 only flags CPIs whose *program* is a raw account (typed `Program<'info, T>` no longer flags); SOL-004 also flags unseeds-verified vault/treasury/pool accounts used in value movement; SOL-005 catches variable-exponent `pow()` in value math; SOL-008 follows `let x = &ctx.accounts.f` aliases, scopes usages to the owning struct's handlers, and no longer mistakes `field.owner = ...` assignments for checks; SOL-009 recognizes `try_borrow_mut_lamports() = 0` manual closes.
 - marginfi re-scan sanity check: 24 findings (was 20) — the main program stays clean; the new signal lands in mock/integration programs.
 

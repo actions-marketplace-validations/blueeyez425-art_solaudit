@@ -17,7 +17,7 @@ use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
 use anchor_spl::token::{Mint, TokenAccount};
 
-declare_id!("So1Scape11111111111111111111111111111111111");
+declare_id!("FktfpyzXU7AjX6zDf3ffWJSCy5VbpKnBhYbbL5vXMUJM");
 
 pub const GRID_SIZE: u8 = 100;
 pub const CLAIM_FEE_LAMPORTS: u64 = 10_000_000; // 0.01 SOL
@@ -252,7 +252,7 @@ pub struct Initialize<'info> {
 
 #[derive(Accounts)]
 pub struct RegisterPlayer<'info> {
-    #[account(init_if_needed, payer = player, space = 8 + 32 + 8 + 4, seeds = [b"player", player.key().as_ref()], bump)]
+    #[account(init_if_needed, payer = player, space = 8 + 32 + 8 + 4, seeds = [b"player".as_slice(), player.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     #[account(mut)]
     pub player: Signer<'info>,
@@ -264,9 +264,9 @@ pub struct RegisterPlayer<'info> {
 pub struct ClaimTile<'info> {
     #[account(seeds = [b"config"], bump)]
     pub config: Account<'info, Config>,
-    #[account(init, payer = player, space = 8 + 32 + 1 + 1 + 1 + 8, seeds = [b"tile", &[x], &[y]], bump)]
+    #[account(init, payer = player, space = 8 + 32 + 1 + 1 + 1 + 8, seeds = [b"tile".as_slice(), x.to_le_bytes().as_slice(), y.to_le_bytes().as_slice()], bump)]
     pub tile: Account<'info, Tile>,
-    #[account(mut, seeds = [b"player", player.key().as_ref()], bump)]
+    #[account(mut, seeds = [b"player".as_slice(), player.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     /// CHECK: treasury PDA
     #[account(mut, seeds = [b"treasury"], bump)]
@@ -280,7 +280,7 @@ pub struct ClaimTile<'info> {
 pub struct UpgradeTile<'info> {
     #[account(mut, has_one = owner)]
     pub tile: Account<'info, Tile>,
-    #[account(seeds = [b"player", owner.key().as_ref()], bump)]
+    #[account(seeds = [b"player".as_slice(), owner.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     /// CHECK: treasury PDA — SEEDED B8-adjacent: no seeds binding here either
     #[account(mut)]
@@ -367,7 +367,7 @@ pub struct GrantAchievement<'info> {
 pub struct Harvest<'info> {
     #[account(has_one = owner)]
     pub tile: Account<'info, Tile>,
-    #[account(mut, seeds = [b"player", owner.key().as_ref()], bump)]
+    #[account(mut, seeds = [b"player".as_slice(), owner.key().as_ref()], bump)]
     pub profile: Account<'info, PlayerProfile>,
     pub owner: Signer<'info>,
 }
